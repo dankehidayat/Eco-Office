@@ -1,11 +1,34 @@
 <div align="center">
-   
+
 # Smart Office Guardian - Energy & Environment Monitoring IoT System
 
 </div>
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Features](#features)
+3. [Hardware Components](#hardware-components)
+4. [Sensor Calibration Methodology](#sensor-calibration-methodology)
+5. [Fuzzy Mamdani Logic System](#fuzzy-mamdani-logic-system)
+   - [Thermal Comfort Classification](#1-thermal-comfort-classification-v10)
+   - [Energy Consumption Classification](#2-energy-consumption-classification-v11)
+6. [LCD Display System](#lcd-display-system)
+7. [Blynk Virtual Pin Mapping](#blynk-virtual-pin-mapping)
+8. [Installation and Setup](#installation-and-setup)
+9. [System Operation](#system-operation)
+10. [Technical Specifications](#technical-specifications)
+11. [Google Sheets Integration](#google-sheets-integration)
+12. [Applications](#applications)
+13. [Future Enhancements](#future-enhancements)
+14. [License](#license)
+15. [Author](#author)
+
+---
+
 ## Overview
-An advanced IoT monitoring system that tracks electrical energy consumption and environmental conditions using ESP32 microcontroller with intelligent fuzzy logic classification. The system integrates PZEM-004T for power monitoring and DHT11 for temperature/humidity sensing, with enhanced calibration algorithms and real-time fuzzy analysis for smart office optimization.
+
+An IoT monitoring system for tracking electrical energy consumption and environmental conditions using an ESP32 microcontroller. The system integrates a PZEM-004T power monitoring module and a DHT11 temperature/humidity sensor, enhanced with linear regression calibration and a dual Fuzzy Mamdani inference engine for smart office classification.
 
 <div align="center">
 
@@ -16,16 +39,22 @@ An advanced IoT monitoring system that tracks electrical energy consumption and 
 
 </div>
 
+---
+
 ## Features
-- **Real-time Power Monitoring**: Voltage, current, power, energy, frequency, power factor, and reactive power
-- **Environmental Sensing**: Temperature and humidity monitoring with HTC-1 reference calibration (95.8%-97.7% accuracy)
-- **Fuzzy Logic Intelligence**: Dual fuzzy systems for thermal comfort and energy consumption classification
+
+- **Real-time Power Monitoring**: Voltage, current, active power, energy, frequency, power factor, apparent power, and reactive power
+- **Environmental Sensing**: Temperature and humidity monitoring with HTC-1 reference calibration achieving 95.8%–97.7% accuracy
+- **Fuzzy Mamdani Intelligence**: Dual fuzzy inference systems for thermal comfort and energy consumption classification
 - **IoT Connectivity**: Blynk platform integration with Google Sheets data logging
-- **LCD Display**: 5-mode rotating display with full text labels and fuzzy status
-- **WiFi Manager**: Easy network configuration with "EcoOffice" access point
-- **Data Logging**: Comprehensive serial monitoring with real-time accuracy analysis
+- **LCD Display**: 5-mode rotating display showing power metrics, environmental data, and fuzzy classification results
+- **WiFi Manager**: On-device network configuration via "EcoOffice" access point
+- **Data Logging**: Serial monitoring with real-time calibration accuracy analysis
+
+---
 
 ## Hardware Components
+
 <div align="center">
 
 | |
@@ -35,127 +64,224 @@ An advanced IoT monitoring system that tracks electrical energy consumption and 
 
 </div>
 
-- **ESP32 Development Board**
-- **PZEM-004T Power Monitoring Module**
-- **DHT11 Temperature/Humidity Sensor**
-- **HTC-1 Reference Thermometer/Hygrometer**
-- **16x2 I2C LCD Display** (Address: 0x27)
-- **Breadboard and Jumper Wires**
+- ESP32 Development Board
+- PZEM-004T Power Monitoring Module
+- DHT11 Temperature/Humidity Sensor
+- HTC-1 Reference Thermometer/Hygrometer (used for calibration)
+- 16x2 I2C LCD Display (Address: 0x27)
+- Breadboard and Jumper Wires
 
-## Enhanced Sensor Calibration Methodology
+---
 
-### Advanced Linear Regression Analysis
+## Sensor Calibration Methodology
 
-The system employs **enhanced linear regression analysis** based on 34 data points for superior accuracy:
+### Linear Regression Analysis
 
-#### Temperature Calibration (95.8% Accuracy):
+Calibration uses linear regression based on 34 paired measurement points between the DHT11 and an HTC-1 reference device.
+
+#### Temperature Calibration (R² = 0.958, Accuracy: 95.8%)
+
 ```
-HTC-1 = 0.923 × DHT11 - 1.618 (R² = 0.958)
+HTC-1 = 0.923 × DHT11 - 1.618
 ```
-- **R² = 0.958** indicates excellent linear correlation
-- **Slope (0.923)**: Precise rate of change adjustment
-- **Intercept (-1.618)**: Systematic offset correction
 
-#### Humidity Calibration (97.7% Accuracy):
+- **Slope (0.923)**: Rate-of-change correction between DHT11 and reference
+- **Intercept (-1.618)**: Systematic offset correction at zero
+- **R² = 0.958**: Model explains 95.8% of variance in the reference data
+
+#### Humidity Calibration (R² = 0.977, Accuracy: 97.7%)
+
 ```
-HTC-1 = 0.926 × DHT11 + 18.052 (R² = 0.977)
+HTC-1 = 0.926 × DHT11 + 18.052
 ```
-- **R² = 0.977** indicates outstanding linear relationship
-- **Slope (0.926)**: Fine-tuned humidity scaling
-- **Intercept (18.052)**: Significant baseline adjustment
+
+- **Slope (0.926)**: Fine-tuned humidity scaling factor
+- **Intercept (+18.052)**: Significant baseline upward correction (DHT11 reads consistently lower)
+- **R² = 0.977**: Model explains 97.7% of variance in the reference data
+
+### Alternative Bias-Based Calibration
+
+A simpler constant-offset method is also implemented for comparison:
+
+- Temperature: `corrected = raw - 3.84°C`
+- Humidity: `corrected = raw + 14.18%`
+
+The regression model is the primary method used for all Blynk and fuzzy outputs.
 
 ### Real-Time Error Monitoring
 
-**Advanced MAE Calculation** with circular buffer:
-```cpp
-// Circular buffer for error tracking
-float tempErrors[10]; // 10 most recent temperature errors
-float humErrors[10];  // 10 most recent humidity errors
+A circular buffer stores the 10 most recent absolute differences between the two calibration methods. Mean Absolute Error (MAE) and accuracy percentage are computed on each reading cycle for continuous self-assessment.
 
-// Real-time accuracy calculation
-float calculateAccuracy(float mae, float range) {
-  return max(0.0, 100.0 - (mae / range * 100.0));
-}
+```
+Accuracy (%) = max(0, 100 - (MAE / Range × 100))
 ```
 
-#### Calibration Performance:
-- **Temperature MAE**: 3.84°C → 95.8% accuracy
-- **Humidity MAE**: 14.18% → 97.7% accuracy
-- **Real-time monitoring**: Continuous accuracy assessment
+Where range is 50°C for temperature and 100% for humidity.
 
-## Intelligent Fuzzy Logic System
+#### Calibration Performance Summary
 
-### Dual Fuzzy Classification Engine
+| Parameter | Raw DHT11 Error | Post-Calibration Error | Accuracy |
+|-----------|-----------------|------------------------|----------|
+| Temperature | ~4.1°C | ~0.42°C | 95.8% |
+| Humidity | ~13.8% | ~2.87% | 97.7% |
 
-#### 1. Thermal Comfort Classification (V10)
-**Based on ASHRAE 55 & ISO 7730 Standards:**
-- **COLD**: Below comfort range (16-22°C)
-- **COOL**: Slightly below optimal
-- **COMFORTABLE**: Optimal office range (20-26°C)
-- **WARM**: Slightly above optimal  
-- **HOT**: Above comfort range (28-34°C)
+---
 
-**8 Fuzzy Rules:**
-- IF Temperature is COLD THEN Comfort is COLD
-- IF Temperature is COMFORTABLE AND Humidity is COMFORTABLE THEN Comfort is COMFORTABLE
-- IF Temperature is COMFORTABLE AND Humidity is DRY THEN Comfort is COOL
-- IF Temperature is COMFORTABLE AND Humidity is HUMID THEN Comfort is WARM
-- IF Temperature is WARM THEN Comfort is WARM
-- IF Temperature is HOT THEN Comfort is HOT
-- IF Temperature is COLD AND Humidity is HUMID THEN Comfort is COOL
-- IF Temperature is HOT AND Humidity is HUMID THEN Comfort is HOT
+## Fuzzy Mamdani Logic System
 
-#### 2. Energy Consumption Classification (V11)
-**Based on IEEE 1159 Power Quality Standards:**
+The system implements a **Fuzzy Mamdani** inference method. Each fuzzy system follows the standard four-stage pipeline: fuzzification, rule evaluation (using MIN for AND, MAX for OR), aggregation, and defuzzification via maximum membership (max-crisp).
 
-**13 Fuzzy Rules for Energy Efficiency:**
-- **ECONOMICAL**: Low consumption with good power quality
-- **NORMAL**: Standard operation within expected ranges  
-- **WASTEFUL**: High consumption or poor power quality
+### 1. Thermal Comfort Classification (V10)
 
-**Input Parameters:**
-- Voltage (PLN Standard: 220V ±10%)
-- Power (Office consumption: 200-1500W)
-- Power Factor (Industrial standard: >0.8 good)
-- Reactive Power (Quality indicator)
+Based on ASHRAE 55 and ISO 7730 thermal comfort standards.
 
-## Enhanced Data Collection & Display
+#### Input Membership Functions
 
-### 5-Mode LCD Display System
+**Temperature (°C) — 4 sets:**
 
-```cpp
-// Display Modes with Full Text Labels
-switch (displayMode) {
-  case 0: // Voltage & Current
-    lcd.print("Voltage: " + String(voltage, 1) + "V");
-    lcd.print("Current: " + String(current, 3) + "A");
-    break;
-  case 1: // Power & Frequency
-    lcd.print("Power: " + String(power, 1) + "W");
-    lcd.print("Frequency: " + String(frequency, 1) + "Hz");
-    break;
-  case 2: // Energy & Power Factor
-    lcd.print("Energy: " + String(energyWh, 1) + "Wh");
-    lcd.print("Power Factor: " + String(pf, 2));
-    break;
-  case 3: // Temperature & Humidity
-    lcd.print("Temperature: " + String(calibratedTemp, 1) + "C");
-    lcd.print("Humidity: " + String(calibratedHum, 1) + "%");
-    break;
-  case 4: // Fuzzy Logic Status
-    lcd.print("Comfort: " + tempComfort);
-    lcd.print("Energy: " + energyStatus);
-    break;
-}
+| Linguistic Variable | Type | Range |
+|---|---|---|
+| COLD | Trapezoidal | <= 18 (full), fades out at 22 |
+| COMFORTABLE | Triangular | 20 – 23 – 26 |
+| WARM | Triangular | 24 – 27 – 30 |
+| HOT | Trapezoidal | rises from 26, full at >= 28 |
+
+**Humidity (%) — 3 sets:**
+
+| Linguistic Variable | Type | Range |
+|---|---|---|
+| DRY | Trapezoidal | <= 30 (full), fades out at 40 |
+| COMFORTABLE | Triangular | 30 – 50 – 70 |
+| HUMID | Trapezoidal | rises from 50, full at >= 60 |
+
+#### Output Categories
+
+`COLD` | `COOL` | `COMFORTABLE` | `WARM` | `HOT`
+
+#### Rule Base (8 Rules)
+
+| Rule | Condition | Output |
+|------|-----------|--------|
+| R1 | IF Temperature is COLD | COLD |
+| R2 | IF Temperature is COMFORTABLE AND Humidity is COMFORTABLE | COMFORTABLE |
+| R3 | IF Temperature is COMFORTABLE AND Humidity is DRY | COOL |
+| R4 | IF Temperature is COMFORTABLE AND Humidity is HUMID | WARM |
+| R5 | IF Temperature is WARM | WARM |
+| R6 | IF Temperature is HOT | HOT |
+| R7 | IF Temperature is COLD AND Humidity is HUMID | COOL |
+| R8 | IF Temperature is HOT AND Humidity is HUMID | HOT |
+
+---
+
+### 2. Energy Consumption Classification (V11)
+
+Designed and tuned for **small office electrical loads in the range of 0–150W**, consistent with equipment such as laptops, monitors, LED lighting, and phone chargers. This system replaces a prior version that was scaled for larger loads (200–1500W) and is incompatible with this environment.
+
+The output is sent to Blynk V11 as a **numeric integer** (1, 2, or 3) for compatibility with Google Sheets processing.
+
+| Numeric | Category |
+|---------|----------|
+| 1 | ECONOMICAL |
+| 2 | NORMAL |
+| 3 | WASTEFUL |
+
+#### Input Membership Functions
+
+**Voltage (V) — 3 sets:**
+
+| Linguistic Variable | Type | Range |
+|---|---|---|
+| LOW | Trapezoidal | <= 200 (full), fades out at 210 |
+| NORMAL | Triangular | 205 – 220 – 235 |
+| HIGH | Trapezoidal | rises from 230, full at >= 235 |
+
+**Active Power (W) — 3 sets (tuned for 0–150W office load):**
+
+| Linguistic Variable | Type | Range |
+|---|---|---|
+| ECONOMICAL | Trapezoidal | <= 20 (full), fades out at 30 |
+| NORMAL | Triangular | 25 – 47.5 – 70 |
+| WASTEFUL | Trapezoidal | rises from 60, full at >= 80 |
+
+**Power Factor — 3 sets:**
+
+| Linguistic Variable | Type | Range |
+|---|---|---|
+| POOR | Trapezoidal | <= 0.5 (full), fades out at 0.6 |
+| FAIR | Triangular | 0.55 – 0.70 – 0.85 |
+| GOOD | Trapezoidal | rises from 0.80, full at >= 0.90 |
+
+**Reactive Power (VAR) — 3 sets:**
+
+| Linguistic Variable | Type | Range |
+|---|---|---|
+| LOW | Trapezoidal | <= 15 (full), fades out at 25 |
+| MEDIUM | Triangular | 20 – 37.5 – 55 |
+| HIGH | Trapezoidal | rises from 45, full at >= 60 |
+
+#### Output Categories
+
+`ECONOMICAL` | `NORMAL` | `WASTEFUL`
+
+#### Rule Base (15 Rules)
+
+**Group 1 — ECONOMICAL (4 rules):**
+
+| Rule | Condition | Output |
+|------|-----------|--------|
+| R1 | IF Power is ECONOMICAL AND Power Factor is GOOD | ECONOMICAL |
+| R2 | IF Power is ECONOMICAL AND Reactive Power is LOW | ECONOMICAL |
+| R3 | IF Power is ECONOMICAL AND Voltage is NORMAL | ECONOMICAL |
+| R4 | IF Power Factor is GOOD AND Reactive Power is LOW | ECONOMICAL |
+
+**Group 2 — NORMAL (5 rules):**
+
+| Rule | Condition | Output |
+|------|-----------|--------|
+| R5 | IF Power is NORMAL AND Power Factor is FAIR | NORMAL |
+| R6 | IF Power is NORMAL AND Voltage is NORMAL | NORMAL |
+| R7 | IF Power is NORMAL AND Reactive Power is MEDIUM | NORMAL |
+| R8 | IF Power Factor is FAIR AND Voltage is NORMAL | NORMAL |
+| R9 | IF Power is ECONOMICAL AND Power Factor is POOR | NORMAL (compensated) |
+
+**Group 3 — WASTEFUL (6 rules):**
+
+| Rule | Condition | Output |
+|------|-----------|--------|
+| R10 | IF Power is WASTEFUL | WASTEFUL |
+| R11 | IF Power Factor is POOR | WASTEFUL |
+| R12 | IF Reactive Power is HIGH | WASTEFUL |
+| R13 | IF Voltage is LOW OR Voltage is HIGH | WASTEFUL |
+| R14 | IF Power is NORMAL AND Power Factor is POOR | WASTEFUL |
+| R15 | IF Power is WASTEFUL AND Reactive Power is HIGH | WASTEFUL |
+
+#### Defuzzification
+
+Maximum membership (max-crisp) method: the output category with the highest aggregated firing strength is selected as the final classification.
+
+---
+
+## LCD Display System
+
+The LCD cycles through 5 display modes, updating every 3 seconds.
+
+```
+Mode 0: Voltage (V)     | Current (A)
+Mode 1: Power (W)       | Frequency (Hz)
+Mode 2: Energy (Wh)     | Power Factor
+Mode 3: Temperature (C) | Humidity (%)
+Mode 4: Comfort status  | Energy status (numeric)
 ```
 
-### Blynk Virtual Pin Mapping
+---
+
+## Blynk Virtual Pin Mapping
 
 | Virtual Pin | Data Type | Description |
 |-------------|-----------|-------------|
 | V0 | Float | Voltage (V) |
 | V1 | Float | Current (A) |
-| V2 | Float | Power (W) |
+| V2 | Float | Active Power (W) |
 | V3 | Float | Power Factor |
 | V4 | Float | Apparent Power (VA) |
 | V5 | Float | Energy (Wh) |
@@ -163,130 +289,153 @@ switch (displayMode) {
 | V7 | Float | Reactive Power (VAR) |
 | V8 | Float | Calibrated Temperature (°C) |
 | V9 | Float | Calibrated Humidity (%) |
-| V10 | String | Thermal Comfort Status |
-| V11 | String | Energy Consumption Status |
+| V10 | String | Thermal Comfort Status (e.g. "COMFORTABLE") |
+| V11 | Integer | Energy Consumption Status (1=ECONOMICAL, 2=NORMAL, 3=WASTEFUL) |
+
+---
 
 ## Installation and Setup
 
 ### Prerequisites
-- **Arduino IDE** with ESP32 support
-- **Required Libraries**:
-  - `Blynk` - IoT platform integration
-  - `LiquidCrystal_I2C` - LCD display control
-  - `WiFiManager` - Network configuration
-  - `PZEM004Tv30` - Power monitoring
-  - `DHT sensor library` - Environmental sensing
 
-### Hardware Configuration
+- Arduino IDE with ESP32 board support installed
+- Required libraries:
+  - `Blynk` — IoT platform integration
+  - `LiquidCrystal_I2C` — LCD display control
+  - `WiFiManager` — On-device network configuration
+  - `PZEM004Tv30` — Power monitoring
+  - `DHT sensor library` — Environmental sensing
 
-```cpp
-// Pin Definitions
-PZEM-004T: RX=16, TX=17 (HardwareSerial UART1)
-DHT11: Pin 27
-LCD: I2C Address 0x27
-Boot Button: Pin 0 (WiFi Reset)
+### Hardware Pin Configuration
 
-// WiFi Configuration
-AP_SSID: "EcoOffice"
-AP_PASS: "guard14n0ff1ce"
+```
+PZEM-004T : RX = GPIO16, TX = GPIO17 (HardwareSerial UART1)
+DHT11     : GPIO27
+LCD       : I2C Address 0x27
+Boot Btn  : GPIO0 (hold 5s to reset WiFi credentials)
+```
+
+### WiFi Configuration
+
+```
+AP SSID   : EcoOffice
+AP Pass   : guard14n0ff1ce
+Timeout   : 60 seconds
 ```
 
 ### Blynk Setup
-1. Use template: `TMPL6eUbLFTuj` - "Energy Monitor"
-2. Configure local server: `iot.serangkota.go.id:8080`
-3. Set up virtual pins V0-V11 for data visualization
+
+1. Template ID: `TMPL6eUbLFTuj` — "Energy Monitor"
+2. Local server: `iot.serangkota.go.id`, port `8080`
+3. Configure virtual pins V0–V11 in the Blynk dashboard
+
+---
 
 ## System Operation
 
-### Enhanced Startup Sequence
-1. **LCD Initialization** - EcoOffice branding display
-2. **WiFi Connection** - With blinking LED feedback and IP display
-3. **Sensor Calibration** - Advanced linear regression activation
-4. **Blynk Connection** - Local server integration
-5. **Fuzzy System Initialization** - Rule base setup
-6. **Continuous Monitoring** - 3-second intervals with 5-mode display
+### Startup Sequence
 
-### Real-time Monitoring Features
-- **3-second sensor reading intervals**
-- **5-mode LCD rotation** (3 seconds per mode)
-- **Blynk real-time updates** for all parameters
-- **Serial logging** every 18 seconds (6 readings)
-- **Fuzzy classification** updates on V10/V11
+1. LCD initialization with EcoOffice branding
+2. Boot button check (hold GPIO0 for 5 seconds to wipe WiFi credentials)
+3. WiFi connection via WiFiManager with LCD blink feedback
+4. IP address display on successful connection
+5. Blynk connection to local server
+6. PZEM-004T and DHT11 sensor initialization
+7. Continuous monitoring begins at 3-second intervals
+
+### Runtime Behavior
+
+- Sensor readings every 3 seconds
+- LCD rotates through 5 display modes each cycle
+- Blynk receives updated values every reading
+- Fuzzy Mamdani classification runs on every reading cycle (V10, V11)
+- Serial monitor logs full sensor and classification data every 18 seconds (every 6 readings)
+
+---
 
 ## Technical Specifications
 
-### Enhanced Sensor Accuracy
+### System Performance
 
-| Parameter | Raw DHT11 Error | After Calibration | Accuracy | Improvement |
-|-----------|-----------------|-------------------|----------|-------------|
-| Temperature | ±4.1°C | ±0.42°C | 95.8% | 90% |
-| Humidity | ±13.8% | ±2.87% | 97.7% | 79% |
+| Parameter | Value |
+|-----------|-------|
+| Sensor Reading Interval | 3 seconds |
+| LCD Mode Rotation | 5 modes x 3 seconds |
+| Blynk Update Rate | Every reading (3s) |
+| Serial Log Interval | Every 18 seconds |
+| WiFi Portal Timeout | 60 seconds |
+| Calibration Buffer Size | 10 readings (circular) |
 
-### System Performance Metrics
+### Fuzzy System Summary
 
-| Aspect | Specification |
-|--------|---------------|
-| Monitoring Interval | 3 seconds |
-| LCD Update | 5 modes × 3 seconds |
-| Blynk Update | Real-time |
-| Serial Logging | Every 18 seconds |
-| WiFi Timeout | 60 seconds |
-| Fuzzy Update | Every reading |
+| System | Input Variables | Rule Count | Output Categories |
+|--------|----------------|------------|-------------------|
+| Thermal Comfort | Temperature, Humidity | 8 | COLD, COOL, COMFORTABLE, WARM, HOT |
+| Energy Consumption | Voltage, Power, Power Factor, Reactive Power | 15 | ECONOMICAL (1), NORMAL (2), WASTEFUL (3) |
 
-### Calibration Effectiveness
-- **Temperature R²**: 0.958 (Excellent correlation)
-- **Humidity R²**: 0.977 (Outstanding correlation)  
-- **Overall Accuracy**: 95.8%-97.7% for both parameters
-- **Implementation**: Linear regression for maximum precision
+---
 
 ## Google Sheets Integration
 
-### Enhanced App Script Features
-- **Automatic data logging** from Blynk virtual pins
-- **Fuzzy classification capture** from V10 and V11
-- **Advanced calculations**:
+### App Script Features
+
+- Automatic data logging from Blynk virtual pins V0–V11
+- Fuzzy classification capture: V10 (string) and V11 (numeric integer)
+- Derived calculations:
   - Current per kW analysis
-  - Power Quality Score (0-100)
-  - Energy cost calculation (Rp/kWh)
+  - Power Quality Score (0–100)
+  - Energy cost estimation (Rp/kWh)
   - Voltage stability percentage
 
 ### Data Access
-🔗 **[Live Monitoring Dashboard](https://ipb.link/energy-temperature-monitoring-data)**
 
 <div align="center">
-  
+
 **Scan for Mobile Access:**
 
 <img width="128" height="128" alt="QR Code" src="https://github.com/user-attachments/assets/7a710f50-6f1c-44da-a7c9-cdb8f2d4445a" />
 
+[Live Monitoring Dashboard](https://ipb.link/energy-temperature-monitoring-data)
+
 </div>
 
+---
+
 ## Applications
-- **Smart Office Optimization** - Thermal comfort and energy efficiency
-- **HVAC System Management** - Environmental condition tracking
-- **Energy Consumption Analytics** - Fuzzy-based classification
-- **IoT Research Platform** - Advanced sensor calibration studies
-- **Building Management Systems** - Real-time monitoring and alerts
 
-## Future Enhancements
-- **Machine Learning Integration** - Predictive maintenance
-- **Multi-zone Monitoring** - Expanded sensor networks
-- **Mobile App Development** - Enhanced user interface
-- **Cloud Analytics** - Advanced data processing
-- **Automated Reporting** - Scheduled performance insights
-
-## License
-This project is licensed under the [UNLICENSE](https://github.com/dankehidayat/energy-temperature-monitor/blob/master/UNLICENSE).
-
-## Author
-**Danke Hidayat** - IoT & Embedded Systems Developer  
-*Specializing in smart office solutions and sensor fusion technologies*
+- Smart office optimization — thermal comfort and energy efficiency
+- HVAC system management — environmental condition tracking
+- Energy consumption analytics — Fuzzy Mamdani-based classification
+- IoT research platform — sensor calibration and fuzzy inference studies
+- Building management systems — real-time monitoring
 
 ---
-**Last updated**: December 2024  
 
-**Calibration data**: Based on 34-point comprehensive analysis  
+## Future Enhancements
 
-**System optimized for**: PT. Global Kreatif Inovasi smart office environment  
+- Machine learning integration for predictive maintenance
+- Multi-zone monitoring with expanded sensor networks
+- ~~Mobile application development for enhanced UI~~
+- Cloud analytics for advanced data processing
+- Automated scheduled reporting
+
+---
+
+## License
+
+This project is licensed under the [UNLICENSE](https://github.com/dankehidayat/Eco-Office/blob/master/UNLICENSE).
+
+---
+
+## Author
+
+**Danke Hidayat** — IoT & Embedded Systems Developer
+Specializing in smart office solutions and sensor fusion technologies
+
+---
+
+**Last updated**: March 2026
+
+Also see my own app called [flowpoint](https://github.com/dankehidayat/flowpoint)
 
 *For real-time sensor data and performance metrics, [access the live dashboard](https://ipb.link/energy-temperature-monitoring-data).*
