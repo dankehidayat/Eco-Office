@@ -4,6 +4,11 @@
 
 </div>
 
+> **Note (`feat/selene-mqtt-ota` branch only)**  
+> Edge firmware for the **[Selene](https://github.com/dankehidayat/Selene)** dashboard (MQTT telemetry + HTTPS OTA) lives in [`Energy_Monitor/`](./Energy_Monitor/).  
+> The **`main`** branch remains dedicated to the final report and the original Eco Office sketch — do not merge Selene secrets or production tokens into `main`.  
+> Configure blank placeholders in `Energy_Monitor.ino` before flash (see [`Energy_Monitor/README.md`](./Energy_Monitor/README.md)).
+
 ## Table of Contents
 
 1. [Overview](#overview)
