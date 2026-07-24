@@ -1,463 +1,304 @@
-<div align="center">
+# Eco Office — Energy & Environment Monitor (Selene)
 
-# Smart Office Guardian - Energy & Environment Monitoring IoT System
+**Branch:** `feat/selene-mqtt-ota`  
 
-</div>
+ESP32 firmware for the **[Selene](https://github.com/dankehidayat/Selene)** smart energy & climate dashboard.  
+Monitors **electrical energy** (PZEM-004T) and **environment** (DHT11 temperature & humidity), publishes MQTT telemetry, and supports **HTTPS OTA** from the Selene Admin UI.
 
-> ### Branch `feat/selene-mqtt-ota` (Selene integration)
->
-> This branch **overwrites root [`Eco Office.ino`](./Eco%20Office.ino)** with the Selene-ready sketch:
-> energy (**PZEM-004T**) + environment (**DHT11** temperature/humidity), MQTT telemetry, and HTTPS OTA.
->
-> - **`main`** keeps the original final-report sketch — do not merge production secrets into `main`.
-> - Fill blank placeholders in `Eco Office.ino` locally before USB flash (MQTT, Blynk, WiFi portal, API base URL).
-> - Companion cloud app: [Selene](https://github.com/dankehidayat/Selene) (`feat/modular-microservices`).
->
-> **Configure (leave blank in git):**
-> ```cpp
-> #define MQTT_BROKER   ""   // VPS IP or hostname
-> #define MQTT_USER     ""
-> #define MQTT_PASSWORD ""
-> #define NODE_ID       "office-main"
-> #define SELENE_API_BASE "https://YOUR_DOMAIN/api"
-> char auth[] = "";          // Blynk token
-> #define AP_PASS ""         // WiFiManager portal password
-> ```
->
-> **Arduino IDE:** Board *ESP32 Dev Module*, partition scheme **with OTA**, open **`Eco Office.ino`** at the **repo root**.
+> **`main` is separate.** That branch is reserved for the final academic report and the original sketch.  
+> This branch **replaces** root `Eco Office.ino` with the Selene-integrated firmware.  
+> **Do not commit secrets** (MQTT passwords, Blynk tokens, WiFi portal passwords).
 
-## Table of Contents
+---
+
+## Table of contents
 
 1. [Overview](#overview)
-2. [Features](#features)
-3. [Hardware Components](#hardware-components)
-4. [Sensor Calibration Methodology](#sensor-calibration-methodology)
-5. [Fuzzy Mamdani Logic System](#fuzzy-mamdani-logic-system)
-   - [Thermal Comfort Classification](#1-thermal-comfort-classification-v10)
-   - [Energy Consumption Classification](#2-energy-consumption-classification-v11)
-6. [LCD Display System](#lcd-display-system)
-7. [Blynk Virtual Pin Mapping](#blynk-virtual-pin-mapping)
-8. [Installation and Setup](#installation-and-setup)
-9. [System Operation](#system-operation)
-10. [Technical Specifications](#technical-specifications)
-11. [Google Sheets Integration](#google-sheets-integration)
-12. [Applications](#applications)
-13. [Future Enhancements](#future-enhancements)
-14. [License](#license)
-15. [Author](#author)
+2. [Hardware](#hardware)
+3. [Repository layout](#repository-layout)
+4. [Features](#features)
+5. [Configuration](#configuration)
+6. [MQTT protocol](#mqtt-protocol)
+7. [Arduino IDE setup](#arduino-ide-setup)
+8. [First flash (USB)](#first-flash-usb)
+9. [OTA update via Selene](#ota-update-via-selene)
+10. [Blynk (optional)](#blynk-optional)
+11. [LCD display modes](#lcd-display-modes)
+12. [Fuzzy classification](#fuzzy-classification)
+13. [Troubleshooting](#troubleshooting)
+14. [Related projects](#related-projects)
+15. [License](#license)
 
 ---
 
 ## Overview
 
-An IoT monitoring system for tracking electrical energy consumption and environmental conditions using an ESP32 microcontroller. The system integrates a PZEM-004T power monitoring module and a DHT11 temperature/humidity sensor, enhanced with linear regression calibration and a dual Fuzzy Mamdani inference engine for smart office classification.
+| Layer | Role |
+|-------|------|
+| **ESP32 DevKit V1** | Edge device |
+| **PZEM-004T** | AC energy: voltage, current, power, PF, frequency, energy |
+| **DHT11** | Environment: temperature, humidity (with calibration) |
+| **EMQX (VPS)** | MQTT broker |
+| **Selene backend** | Ingest, TimescaleDB, Admin OTA API |
+| **Selene frontend** | Dashboard + Admin Tools → Firmware |
 
-<div align="center">
+Data path:
 
-| Blynk Dashboard | LCD Display |
-|:------------:|:--------------:|
-| <img width="240" height="533" src="https://github.com/user-attachments/assets/912dc2a3-61f9-486d-ab43-2b00a42f24fa"> | <img width="240" height="533" src="https://github.com/user-attachments/assets/38b05b3e-0596-4843-8f7a-c68e2ff991aa"> |
-| **Figure 1**: Blynk Dashboard | **Figure 2**: LCD Display Interface |
+```text
+Sensors → ESP32 → MQTT selene/<NODE_ID>/telemetry → Selene backend → TimescaleDB → Dashboard
+Selene Admin → POST /api/firmware/upload → MQTT selene/<NODE_ID>/command {ota} → ESP32 HTTPS download → flash → reboot
+```
 
-</div>
+---
+
+## Hardware
+
+| Component | Connection / notes |
+|-----------|-------------------|
+| ESP32 DevKit V1 | 4MB flash recommended |
+| PZEM-004T | UART1: RX=GPIO16, TX=GPIO17, 9600 8N1 |
+| DHT11 | Data on **GPIO27** |
+| LCD 1602 I2C | Address **0x27**, SDA/SCL default Wire |
+| BOOT button (GPIO0) | Hold 5s at boot to reset WiFiManager settings |
+
+---
+
+## Repository layout
+
+```text
+Eco-Office/                    # this branch
+├── Eco Office.ino             # full firmware (energy + environment + MQTT + OTA)
+├── README.md                  # this file
+└── LICENSE
+```
+
+On **`main`**: original report materials and the pre-Selene sketch (unchanged by this branch’s intent).
 
 ---
 
 ## Features
 
-- **Real-time Power Monitoring**: Voltage, current, active power, energy, frequency, power factor, apparent power, and reactive power
-- **Environmental Sensing**: Temperature and humidity monitoring with HTC-1 reference calibration achieving 95.8%–97.7% accuracy
-- **Fuzzy Mamdani Intelligence**: Dual fuzzy inference systems for thermal comfort and energy consumption classification
-- **IoT Connectivity**: Blynk platform integration with Google Sheets data logging
-- **LCD Display**: 5-mode rotating display showing power metrics, environmental data, and fuzzy classification results
-- **WiFi Manager**: On-device network configuration via "EcoOffice" access point
-- **Data Logging**: Serial monitoring with real-time calibration accuracy analysis
+- **Energy monitoring** — voltage, current, active/apparent/reactive power, PF, frequency, cumulative energy  
+- **Environment monitoring** — temperature & humidity with linear-regression calibration  
+- **Fuzzy Mamdani** — thermal comfort (COLD…HOT) and energy class (ECONOMICAL / NORMAL / WASTEFUL)  
+- **LCD** — 5 rotating screens (power + climate + fuzzy labels)  
+- **WiFiManager** — captive portal if no saved WiFi  
+- **MQTT** — telemetry publish + command subscribe (`reboot`, `status`, `ota`)  
+- **HTTPS OTA** — `HTTPUpdate` from Selene Admin `.bin` deploy  
+- **Optional Blynk** — virtual pins for live widgets (credentials blank in git)
 
 ---
 
-## Hardware Components
+## Configuration
 
-<div align="center">
+Open **`Eco Office.ino`** and fill placeholders **locally** (never push real values):
 
-| |
-|:-------------------------:|
-| <img width="480" height="720" alt="Wiring Schematic" src="https://github.com/user-attachments/assets/2fa6e24f-227e-4ad9-a243-f8f93257cdf7"> |
-| **Figure 3**: Hardware system monitoring connection schematic diagram |
+```cpp
+// MQTT / Selene broker
+#define MQTT_BROKER   ""      // e.g. "198.x.x.x" or hostname
+#define MQTT_PORT     1883
+#define MQTT_USER     ""      // EMQX username
+#define MQTT_PASSWORD ""
+#define NODE_ID       "office-main"   // unique per device
 
-</div>
+// OTA result callback base (no trailing slash after /api)
+#define SELENE_API_BASE "https://YOUR_DOMAIN/api"
 
-- ESP32 Development Board
-- PZEM-004T Power Monitoring Module
-- DHT11 Temperature/Humidity Sensor
-- HTC-1 Reference Thermometer/Hygrometer (used for calibration)
-- 16x2 I2C LCD Display (Address: 0x27)
-- Breadboard and Jumper Wires
+// Blynk (optional)
+#define BLYNK_TEMPLATE_ID ""
+#define BLYNK_TEMPLATE_NAME "Eco Office"
+char auth[] = "";
+// Blynk.config(auth, "YOUR_BLYNK_HOST", 8080);
+
+// WiFiManager portal
+#define AP_SSID "EcoOffice"
+#define AP_PASS ""            // portal password when configuring WiFi
+```
+
+| Placeholder | Purpose |
+|-------------|---------|
+| `MQTT_*` | Broker used by Selene / EMQX |
+| `NODE_ID` | Must match Admin “Target node” (e.g. `office-main`) |
+| `SELENE_API_BASE` | Host for `POST .../firmware/result` |
+| `auth` / Blynk host | Optional cloud widgets |
+| `AP_PASS` | WiFi setup portal |
 
 ---
 
-## Sensor Calibration Methodology
+## MQTT protocol
 
-### Linear Regression Analysis
+### Telemetry (device → broker)
 
-Calibration uses linear regression based on 34 paired measurement points between the DHT11 and an HTC-1 reference device.
+- **Topic:** `selene/<NODE_ID>/telemetry`  
+- **Interval:** 30 s (default)  
+- **Payload (JSON):**
 
-#### Temperature Calibration (R² = 0.958, Accuracy: 95.8%)
-
-```
-HTC-1 = 0.923 × DHT11 - 1.618
-```
-
-- **Slope (0.923)**: Rate-of-change correction between DHT11 and reference
-- **Intercept (-1.618)**: Systematic offset correction at zero
-- **R² = 0.958**: Model explains 95.8% of variance in the reference data
-
-#### Humidity Calibration (R² = 0.977, Accuracy: 97.7%)
-
-```
-HTC-1 = 0.926 × DHT11 + 18.052
-```
-
-- **Slope (0.926)**: Fine-tuned humidity scaling factor
-- **Intercept (+18.052)**: Significant baseline upward correction (DHT11 reads consistently lower)
-- **R² = 0.977**: Model explains 97.7% of variance in the reference data
-
-### Alternative Bias-Based Calibration
-
-A simpler constant-offset method is also implemented for comparison:
-
-- Temperature: `corrected = raw - 3.84°C`
-- Humidity: `corrected = raw + 14.18%`
-
-The regression model is the primary method used for all Blynk and fuzzy outputs.
-
-### Real-Time Error Monitoring
-
-A circular buffer stores the 10 most recent absolute differences between the two calibration methods. Mean Absolute Error (MAE) and accuracy percentage are computed on each reading cycle for continuous self-assessment.
-
-```
-Accuracy (%) = max(0, 100 - (MAE / Range × 100))
+```json
+{
+  "voltage": 220.5,
+  "current": 0.5,
+  "power": 100.0,
+  "pf": 0.9,
+  "energy": 12.3,
+  "frequency": 50.0,
+  "apparentPower": 111.1,
+  "reactivePower": 48.0,
+  "temperature": 27.5,
+  "humidity": 60.0
+}
 ```
 
-Where range is 50°C for temperature and 100% for humidity.
+### Status
 
-#### Calibration Performance Summary
+- **Topic:** `selene/<NODE_ID>/status`  
+- Online retain + Last Will offline  
 
-| Parameter | Raw DHT11 Error | Post-Calibration Error | Accuracy |
-|-----------|-----------------|------------------------|----------|
-| Temperature | ~4.1°C | ~0.42°C | 95.8% |
-| Humidity | ~13.8% | ~2.87% | 97.7% |
+### Commands (broker → device)
 
----
+- **Topic:** `selene/<NODE_ID>/command`  
+- Subscribe at QoS 1  
 
-## Fuzzy Mamdani Logic System
+| `command` | Action |
+|-----------|--------|
+| `reboot` | `ESP.restart()` |
+| `status` | Publish RSSI, uptime, free heap |
+| `ota` | HTTPS download `url`, flash, report result, reboot |
 
-The system implements a **Fuzzy Mamdani** inference method. Each fuzzy system follows the standard four-stage pipeline: fuzzification, rule evaluation (using MIN for AND, MAX for OR), aggregation, and defuzzification via maximum membership (max-crisp).
+Example OTA command (from Selene backend):
 
-### 1. Thermal Comfort Classification (V10)
-
-Based on ASHRAE 55 and ISO 7730 thermal comfort standards.
-
-#### Input Membership Functions
-
-**Temperature (°C) — 4 sets:**
-
-| Linguistic Variable | Type | Range |
-|---|---|---|
-| COLD | Trapezoidal | <= 18 (full), fades out at 22 |
-| COMFORTABLE | Triangular | 20 – 23 – 26 |
-| WARM | Triangular | 24 – 27 – 30 |
-| HOT | Trapezoidal | rises from 26, full at >= 28 |
-
-**Humidity (%) — 3 sets:**
-
-| Linguistic Variable | Type | Range |
-|---|---|---|
-| DRY | Trapezoidal | <= 30 (full), fades out at 40 |
-| COMFORTABLE | Triangular | 30 – 50 – 70 |
-| HUMID | Trapezoidal | rises from 50, full at >= 60 |
-
-#### Output Categories
-
-`COLD` | `COOL` | `COMFORTABLE` | `WARM` | `HOT`
-
-#### Rule Base (8 Rules)
-
-| Rule | Condition | Output |
-|------|-----------|--------|
-| R1 | IF Temperature is COLD | COLD |
-| R2 | IF Temperature is COMFORTABLE AND Humidity is COMFORTABLE | COMFORTABLE |
-| R3 | IF Temperature is COMFORTABLE AND Humidity is DRY | COOL |
-| R4 | IF Temperature is COMFORTABLE AND Humidity is HUMID | WARM |
-| R5 | IF Temperature is WARM | WARM |
-| R6 | IF Temperature is HOT | HOT |
-| R7 | IF Temperature is COLD AND Humidity is HUMID | COOL |
-| R8 | IF Temperature is HOT AND Humidity is HUMID | HOT |
-
----
-
-### 2. Energy Consumption Classification (V11)
-
-Designed and tuned for **small office electrical loads in the range of 0–150W**, consistent with equipment such as laptops, monitors, LED lighting, and phone chargers. This system replaces a prior version that was scaled for larger loads (200–1500W) and is incompatible with this environment.
-
-The output is sent to Blynk V11 as a **numeric integer** (1, 2, or 3) for compatibility with Google Sheets processing.
-
-| Numeric | Category |
-|---------|----------|
-| 1 | ECONOMICAL |
-| 2 | NORMAL |
-| 3 | WASTEFUL |
-
-#### Input Membership Functions
-
-**Voltage (V) — 3 sets:**
-
-| Linguistic Variable | Type | Range |
-|---|---|---|
-| LOW | Trapezoidal | <= 200 (full), fades out at 210 |
-| NORMAL | Triangular | 205 – 220 – 235 |
-| HIGH | Trapezoidal | rises from 230, full at >= 235 |
-
-**Active Power (W) — 3 sets (tuned for 0–150W office load):**
-
-| Linguistic Variable | Type | Range |
-|---|---|---|
-| ECONOMICAL | Trapezoidal | <= 20 (full), fades out at 30 |
-| NORMAL | Triangular | 25 – 47.5 – 70 |
-| WASTEFUL | Trapezoidal | rises from 60, full at >= 80 |
-
-**Power Factor — 3 sets:**
-
-| Linguistic Variable | Type | Range |
-|---|---|---|
-| POOR | Trapezoidal | <= 0.5 (full), fades out at 0.6 |
-| FAIR | Triangular | 0.55 – 0.70 – 0.85 |
-| GOOD | Trapezoidal | rises from 0.80, full at >= 0.90 |
-
-**Reactive Power (VAR) — 3 sets:**
-
-| Linguistic Variable | Type | Range |
-|---|---|---|
-| LOW | Trapezoidal | <= 15 (full), fades out at 25 |
-| MEDIUM | Triangular | 20 – 37.5 – 55 |
-| HIGH | Trapezoidal | rises from 45, full at >= 60 |
-
-#### Output Categories
-
-`ECONOMICAL` | `NORMAL` | `WASTEFUL`
-
-#### Rule Base (15 Rules)
-
-**Group 1 — ECONOMICAL (4 rules):**
-
-| Rule | Condition | Output |
-|------|-----------|--------|
-| R1 | IF Power is ECONOMICAL AND Power Factor is GOOD | ECONOMICAL |
-| R2 | IF Power is ECONOMICAL AND Reactive Power is LOW | ECONOMICAL |
-| R3 | IF Power is ECONOMICAL AND Voltage is NORMAL | ECONOMICAL |
-| R4 | IF Power Factor is GOOD AND Reactive Power is LOW | ECONOMICAL |
-
-**Group 2 — NORMAL (5 rules):**
-
-| Rule | Condition | Output |
-|------|-----------|--------|
-| R5 | IF Power is NORMAL AND Power Factor is FAIR | NORMAL |
-| R6 | IF Power is NORMAL AND Voltage is NORMAL | NORMAL |
-| R7 | IF Power is NORMAL AND Reactive Power is MEDIUM | NORMAL |
-| R8 | IF Power Factor is FAIR AND Voltage is NORMAL | NORMAL |
-| R9 | IF Power is ECONOMICAL AND Power Factor is POOR | NORMAL (compensated) |
-
-**Group 3 — WASTEFUL (6 rules):**
-
-| Rule | Condition | Output |
-|------|-----------|--------|
-| R10 | IF Power is WASTEFUL | WASTEFUL |
-| R11 | IF Power Factor is POOR | WASTEFUL |
-| R12 | IF Reactive Power is HIGH | WASTEFUL |
-| R13 | IF Voltage is LOW OR Voltage is HIGH | WASTEFUL |
-| R14 | IF Power is NORMAL AND Power Factor is POOR | WASTEFUL |
-| R15 | IF Power is WASTEFUL AND Reactive Power is HIGH | WASTEFUL |
-
-#### Defuzzification
-
-Maximum membership (max-crisp) method: the output category with the highest aggregated firing strength is selected as the final classification.
-
----
-
-## LCD Display System
-
-The LCD cycles through 5 display modes, updating every 3 seconds.
-
-```
-Mode 0: Voltage (V)     | Current (A)
-Mode 1: Power (W)       | Frequency (Hz)
-Mode 2: Energy (Wh)     | Power Factor
-Mode 3: Temperature (C) | Humidity (%)
-Mode 4: Comfort status  | Energy status (numeric)
+```json
+{
+  "command": "ota",
+  "url": "https://YOUR_DOMAIN/api/firmware/download/office-main",
+  "size": 1086187
+}
 ```
 
 ---
 
-## Blynk Virtual Pin Mapping
+## Arduino IDE setup
 
-| Virtual Pin | Data Type | Description |
-|-------------|-----------|-------------|
-| V0 | Float | Voltage (V) |
-| V1 | Float | Current (A) |
-| V2 | Float | Active Power (W) |
-| V3 | Float | Power Factor |
-| V4 | Float | Apparent Power (VA) |
-| V5 | Float | Energy (Wh) |
-| V6 | Float | Frequency (Hz) |
-| V7 | Float | Reactive Power (VAR) |
-| V8 | Float | Calibrated Temperature (°C) |
-| V9 | Float | Calibrated Humidity (%) |
-| V10 | String | Thermal Comfort Status (e.g. "COMFORTABLE") |
-| V11 | Integer | Energy Consumption Status (1=ECONOMICAL, 2=NORMAL, 3=WASTEFUL) |
+| Setting | Value |
+|---------|--------|
+| Board | **ESP32 Dev Module** (or DOIT ESP32 DEVKIT V1) |
+| Flash Size | **4MB** |
+| **Partition Scheme** | **Default 4MB with spiffs** (or any scheme **with OTA**) |
+| Upload Speed | 921600 (or 115200 if unstable) |
+| Port | USB serial of the DevKit |
 
----
+### Libraries (Library Manager)
 
-## Installation and Setup
+- Blynk  
+- LiquidCrystal I2C  
+- WiFiManager (tzapu)  
+- PZEM004Tv30  
+- DHT sensor library + Adafruit Unified Sensor  
+- PubSubClient  
+- ArduinoJson **v6**  
 
-### Prerequisites
-
-- Arduino IDE with ESP32 board support installed
-- Required libraries:
-  - `Blynk` — IoT platform integration
-  - `LiquidCrystal_I2C` — LCD display control
-  - `WiFiManager` — On-device network configuration
-  - `PZEM004Tv30` — Power monitoring
-  - `DHT sensor library` — Environmental sensing
-
-### Hardware Pin Configuration
-
-```
-PZEM-004T : RX = GPIO16, TX = GPIO17 (HardwareSerial UART1)
-DHT11     : GPIO27
-LCD       : I2C Address 0x27
-Boot Btn  : GPIO0 (hold 5s to reset WiFi credentials)
-```
-
-### WiFi Configuration
-
-```
-AP SSID   : EcoOffice
-AP Pass   : guard14n0ff1ce
-Timeout   : 60 seconds
-```
-
-### Blynk Setup
-
-1. Template ID: `TMPL6eUbLFTuj` — "Energy Monitor"
-2. Local server: `iot.serangkota.go.id`, port `8080`
-3. Configure virtual pins V0–V11 in the Blynk dashboard
+Built into ESP32 core: `WiFi`, `WiFiClientSecure`, `HTTPClient`, `HTTPUpdate`.
 
 ---
 
-## System Operation
+## First flash (USB)
 
-### Startup Sequence
+OTA cannot install itself. Flash this sketch **once over USB**:
 
-1. LCD initialization with EcoOffice branding
-2. Boot button check (hold GPIO0 for 5 seconds to wipe WiFi credentials)
-3. WiFi connection via WiFiManager with LCD blink feedback
-4. IP address display on successful connection
-5. Blynk connection to local server
-6. PZEM-004T and DHT11 sensor initialization
-7. Continuous monitoring begins at 3-second intervals
-
-### Runtime Behavior
-
-- Sensor readings every 3 seconds
-- LCD rotates through 5 display modes each cycle
-- Blynk receives updated values every reading
-- Fuzzy Mamdani classification runs on every reading cycle (V10, V11)
-- Serial monitor logs full sensor and classification data every 18 seconds (every 6 readings)
+1. Clone / checkout this branch:
+   ```bash
+   git clone https://github.com/dankehidayat/Eco-Office.git
+   cd Eco-Office
+   git checkout feat/selene-mqtt-ota
+   ```
+2. Open **`Eco Office.ino`** (repo root) in Arduino IDE.  
+3. Fill configuration placeholders.  
+4. Select board + **OTA partition scheme**.  
+5. **Sketch → Upload**.  
+6. Serial Monitor **115200** — expect WiFi OK, MQTT connect, subscribe to `selene/<NODE_ID>/command`.
 
 ---
 
-## Technical Specifications
+## OTA update via Selene
 
-### System Performance
+1. In Arduino: **Sketch → Export compiled Binary** (optional for later OTAs).  
+2. Selene → log in as **ADMIN** → **Admin Tools → Firmware**.  
+3. Target node = `NODE_ID` (e.g. `office-main`).  
+4. Upload `Eco Office.ino.bin` (main app binary, magic `0xE9`).  
+5. Serial should show:
+   ```text
+   MQTT: Perintah diterima [...]: {"command":"ota",...}
+   MQTT: OTA scheduled
+   OTA: starting HTTPS firmware update
+   OTA: SUCCESS — rebooting
+   ```
+6. Device reboots into the new firmware. Selene may mark history **success** when the full binary is delivered.
 
-| Parameter | Value |
-|-----------|-------|
-| Sensor Reading Interval | 3 seconds |
-| LCD Mode Rotation | 5 modes x 3 seconds |
-| Blynk Update Rate | Every reading (3s) |
-| Serial Log Interval | Every 18 seconds |
-| WiFi Portal Timeout | 60 seconds |
-| Calibration Buffer Size | 10 readings (circular) |
+**Notes:**
 
-### Fuzzy System Summary
-
-| System | Input Variables | Rule Count | Output Categories |
-|--------|----------------|------------|-------------------|
-| Thermal Comfort | Temperature, Humidity | 8 | COLD, COOL, COMFORTABLE, WARM, HOT |
-| Energy Consumption | Voltage, Power, Power Factor, Reactive Power | 15 | ECONOMICAL (1), NORMAL (2), WASTEFUL (3) |
-
----
-
-## Google Sheets Integration
-
-### App Script Features
-
-- Automatic data logging from Blynk virtual pins V0–V11
-- Fuzzy classification capture: V10 (string) and V11 (numeric integer)
-- Derived calculations:
-  - Current per kW analysis
-  - Power Quality Score (0–100)
-  - Energy cost estimation (Rp/kWh)
-  - Voltage stability percentage
-
-### Data Access
-
-<div align="center">
-
-**Scan for Mobile Access:**
-
-<img width="128" height="128" alt="QR Code" src="https://github.com/user-attachments/assets/7a710f50-6f1c-44da-a7c9-cdb8f2d4445a" />
-
-[Live Monitoring Dashboard](https://ipb.link/energy-temperature-monitoring-data)
-
-</div>
+- Do not power-cycle mid-flash.  
+- TLS uses `setInsecure()` for bring-up; pin a CA cert for production.  
+- Sketch size is large (~1 MB); keep an OTA-capable partition table.
 
 ---
 
-## Applications
+## Blynk (optional)
 
-- Smart office optimization — thermal comfort and energy efficiency
-- HVAC system management — environmental condition tracking
-- Energy consumption analytics — Fuzzy Mamdani-based classification
-- IoT research platform — sensor calibration and fuzzy inference studies
-- Building management systems — real-time monitoring
+Virtual pins used when Blynk is connected:
+
+| Pin | Data |
+|-----|------|
+| V0–V7 | Voltage, current, power, PF, apparent, energy, frequency, reactive |
+| V8–V9 | Temperature, humidity |
+| V10–V11 | Fuzzy comfort label, energy class (1/2/3) |
+
+Leave `auth` empty and Blynk host blank if unused; firmware continues with MQTT + LCD.
 
 ---
 
-## Future Enhancements
+## LCD display modes
 
-- Machine learning integration for predictive maintenance
-- Multi-zone monitoring with expanded sensor networks
-- ~~Mobile application development for enhanced UI~~
-- Cloud analytics for advanced data processing
-- Automated scheduled reporting
+Rotates every sensor sample (~3 s):
+
+0. Voltage / current  
+1. Power / frequency  
+2. Energy / power factor  
+3. Temperature / humidity  
+4. Fuzzy comfort / energy class  
+
+---
+
+## Fuzzy classification
+
+- **Thermal comfort:** COLD, COOL, COMFORTABLE, WARM, HOT (temp + humidity membership)  
+- **Energy:** ECONOMICAL, NORMAL, WASTEFUL (voltage, power, PF, reactive rules)  
+
+Aligned with Selene backend analytics for consistent labels on device and dashboard.
+
+---
+
+## Troubleshooting
+
+| Symptom | Check |
+|---------|--------|
+| No MQTT in EMQX | Broker IP, user/pass, `NODE_ID`, firewall :1883 |
+| `bad_username_or_password` | Create EMQX user matching `MQTT_USER` / `MQTT_PASSWORD` |
+| OTA command ignored | USB-flashed this branch? Serial shows “Perintah diterima”? |
+| OTA fails HTTP | `SELENE_API_BASE` / download URL reachable over HTTPS from device network |
+| OTA partition error | Tools → Partition Scheme → one **with OTA** |
+| Admin target empty | Device must publish telemetry first so backend discovers the node |
+
+---
+
+## Related projects
+
+| Project | Role |
+|---------|------|
+| [Selene](https://github.com/dankehidayat/Selene) | Cloud dashboard, API, Timescale, Admin OTA (`feat/modular-microservices`) |
+| This repo `main` | Final report + original Eco Office documentation sketch |
+| This repo `feat/selene-mqtt-ota` | Production-oriented edge firmware for Selene |
 
 ---
 
 ## License
 
-This project is licensed under the [UNLICENSE](https://github.com/dankehidayat/Eco-Office/blob/master/UNLICENSE).
-
----
-
-## Author
-
-**Danke Hidayat** — IoT & Embedded Systems Developer
-Specializing in smart office solutions and sensor fusion technologies
-
----
-
-**Last updated**: March 2026
-
-Also see my own app called [flowpoint](https://github.com/dankehidayat/flowpoint)
-
-*For real-time sensor data and performance metrics, [access the live dashboard](https://ipb.link/energy-temperature-monitoring-data).*
+See [LICENSE](./LICENSE).
