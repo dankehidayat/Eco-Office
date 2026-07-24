@@ -4,10 +4,27 @@
 
 </div>
 
-> **Note (`feat/selene-mqtt-ota` branch only)**  
-> Edge firmware for the **[Selene](https://github.com/dankehidayat/Selene)** dashboard (MQTT telemetry + HTTPS OTA) lives in [`Energy_Monitor/`](./Energy_Monitor/).  
-> The **`main`** branch remains dedicated to the final report and the original Eco Office sketch — do not merge Selene secrets or production tokens into `main`.  
-> Configure blank placeholders in `Energy_Monitor.ino` before flash (see [`Energy_Monitor/README.md`](./Energy_Monitor/README.md)).
+> ### Branch `feat/selene-mqtt-ota` (Selene integration)
+>
+> This branch **overwrites root [`Eco Office.ino`](./Eco%20Office.ino)** with the Selene-ready sketch:
+> energy (**PZEM-004T**) + environment (**DHT11** temperature/humidity), MQTT telemetry, and HTTPS OTA.
+>
+> - **`main`** keeps the original final-report sketch — do not merge production secrets into `main`.
+> - Fill blank placeholders in `Eco Office.ino` locally before USB flash (MQTT, Blynk, WiFi portal, API base URL).
+> - Companion cloud app: [Selene](https://github.com/dankehidayat/Selene) (`feat/modular-microservices`).
+>
+> **Configure (leave blank in git):**
+> ```cpp
+> #define MQTT_BROKER   ""   // VPS IP or hostname
+> #define MQTT_USER     ""
+> #define MQTT_PASSWORD ""
+> #define NODE_ID       "office-main"
+> #define SELENE_API_BASE "https://YOUR_DOMAIN/api"
+> char auth[] = "";          // Blynk token
+> #define AP_PASS ""         // WiFiManager portal password
+> ```
+>
+> **Arduino IDE:** Board *ESP32 Dev Module*, partition scheme **with OTA**, open **`Eco Office.ino`** at the **repo root**.
 
 ## Table of Contents
 

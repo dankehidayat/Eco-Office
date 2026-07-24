@@ -1,255 +1,605 @@
-#include <WiFi.h> // Koneksi WiFi ESP32
-#include <WiFiClient.h> // Klien TCP/IP untuk koneksi internet
-#define BLYNK_TEMPLATE_ID "TMPL6eUbLFTuj" // ID template Blynk dari dashboard
-#define BLYNK_TEMPLATE_NAME "Energy Monitor" // Nama template Blynk
-#include <BlynkSimpleEsp32.h> // Kirim data ke dashboard HP via Blynk
-#include <LiquidCrystal_I2C.h> // Tampil teks ke LCD 16x2 I2C
-#include <WiFiManager.h> // Setting WiFi otomatis tanpa hardcode
-#include <PZEM004Tv30.h> // Baca voltage, current, power, PF, energy
-#include <DHT.h> // Baca suhu dan kelembaban dari DHT11
-#include <Wire.h> // Komunikasi I2C untuk LCD
-#include <math.h> // Fungsi sqrt() untuk hitung daya reaktif
+/*
+ * Eco Office — Smart Energy & Environment Monitor
+ * Board: ESP32 DevKit V1
+ * Sensors:
+ *   - PZEM-004T  → electrical energy (V, I, P, PF, f, energy)
+ *   - DHT11      → environment (temperature, humidity)
+ * Features: Blynk, LCD, MQTT telemetry to Selene, MQTT commands (reboot/status/OTA)
+ *
+ * OTA: Selene Admin publishes to selene/<NODE_ID>/command
+ *   { "command":"ota", "url":"https://YOUR_DOMAIN/api/firmware/download/<node>", "size":N }
+ * Device downloads via HTTPS (HTTPUpdate) and reboots.
+ *
+ * Secrets: leave blank in git; fill locally before flash.
+ */
 
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Inisialisasi LCD alamat I2C 0x27 ukuran 16x2
-HardwareSerial hwSerial(1); // Gunakan UART1 pada ESP32 untuk komunikasi serial
-PZEM004Tv30 pzem(hwSerial, 16, 17); // Inisialisasi PZEM dengan RX pin16 TX pin17
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
 
-#define DHTPIN 27 // Pin D27 pada ESP32 untuk sensor DHT11
-#define DHTTYPE DHT11 // Tipe sensor DHT11
-DHT dht(DHTPIN, DHTTYPE); // Inisialisasi objek DHT11
-#define TRIGGER_PIN 0 // Pin 0 untuk tombol boot/reset WiFi
+#define BLYNK_TEMPLATE_ID ""
+#define BLYNK_TEMPLATE_NAME "Eco Office"
+#include <BlynkSimpleEsp32.h>
+#include <LiquidCrystal_I2C.h>
+#include <WiFiManager.h>
+#include <PZEM004Tv30.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <math.h>
 
-char auth[] = "blank"; // Token Blynk untuk autentikasi
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 
-bool lcdBacklightState = true; // Status awal backlight LCD menyala
-unsigned long previousBlinkMillis = 0; // Waktu terakhir kedip LCD
-const unsigned long BLINK_DELAY = 4500; // Delay 4.5 detik sebelum mulai kedip
-const unsigned long BLINK_INTERVAL = 250; // Interval kedip setiap 250ms
+// ── MQTT / Selene ─────────────────────────────────────────
+#define MQTT_BROKER ""
+#define MQTT_PORT 1883
+#define MQTT_USER ""
+#define MQTT_PASSWORD ""
+#define NODE_ID "office-main"  // change per device
+#define MQTT_PUBLISH_INTERVAL 30000
 
-const float TEMP_SLOPE = 0.923; // Slope regresi linear untuk kalibrasi suhu
-const float TEMP_INTERCEPT = -1.618; // Intercept regresi linear untuk kalibrasi suhu
-const float HUM_SLOPE = 0.926; // Slope regresi linear untuk kalibrasi kelembaban
-const float HUM_INTERCEPT = 18.052; // Intercept regresi linear untuk kalibrasi kelembaban
-const float TEMP_BIAS = -3.84; // Koreksi bias suhu: DHT11 lebih tinggi 3.84°C
-const float HUM_BIAS = +14.18; // Koreksi bias kelembaban: DHT11 lebih rendah 14.18%
+// Report OTA result to backend (no auth required on this route today)
+#define SELENE_API_BASE "https://YOUR_DOMAIN/api"
 
-float tempErrors[10]; // Array untuk menyimpan 10 error suhu terakhir
-float humErrors[10]; // Array untuk menyimpan 10 error kelembaban terakhir
-int errorIndex = 0; // Index circular buffer untuk penyimpanan error
+// ── Hardware ──────────────────────────────────────────────
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+HardwareSerial hwSerial(1);
+PZEM004Tv30 pzem(hwSerial, 16, 17);
 
-float calibrateTemperature(float rawTemp) { return (TEMP_SLOPE * rawTemp) + TEMP_INTERCEPT; } // Kalibrasi suhu dengan regresi linear
-float calibrateHumidity(float rawHum) { return (HUM_SLOPE * rawHum) + HUM_INTERCEPT; } // Kalibrasi kelembaban dengan regresi linear
-float calibrateTemperatureSimple(float rawTemp) { return rawTemp + TEMP_BIAS; } // Kalibrasi suhu metode bias sederhana
-float calibrateHumiditySimple(float rawHum) { return rawHum + HUM_BIAS; } // Kalibrasi kelembaban metode bias sederhana
-void recordCalibrationError(float tempError, float humError) { tempErrors[errorIndex] = tempError; humErrors[errorIndex] = humError; errorIndex = (errorIndex + 1) % 10; } // Catat error kalibrasi ke circular buffer
-void getCurrentMAE(float &tempMAE, float &humMAE) { float tempSum=0,humSum=0; int count=0; for(int i=0;i<10;i++){ if(tempErrors[i]!=0){ tempSum+=abs(tempErrors[i]); humSum+=abs(humErrors[i]); count++; } } tempMAE=count>0?tempSum/count:0; humMAE=count>0?humSum/count:0; } // Hitung Mean Absolute Error real-time
-float calculateAccuracy(float mae, float range) { return max(0.0, 100.0 - (mae / range * 100.0)); } // Hitung akurasi dalam persentase dari MAE
-float zeroIfNan(float value) { return isnan(value) ? 0.0 : value; } // Ubah nilai NaN menjadi 0 untuk menghindari error
+#define DHTPIN 27
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+#define TRIGGER_PIN 0
 
-String fuzzyTemperatureComfort(float temp, float humidity) { // Fungsi fuzzy untuk kenyamanan termal
-  float cold = (temp <= 18) ? 1.0 : (temp <= 22) ? (22 - temp) / 4.0 : 0.0; // Derajat keanggotaan dingin
-  float comfortable = (temp >= 20 && temp <= 23) ? (temp - 20) / 3.0 : (temp > 23 && temp <= 26) ? (26 - temp) / 3.0 : 0.0; // Derajat keanggotaan nyaman
-  float warm = (temp >= 24 && temp <= 27) ? (temp - 24) / 3.0 : (temp > 27 && temp <= 30) ? (30 - temp) / 3.0 : 0.0; // Derajat keanggotaan hangat
-  float hot = (temp >= 28) ? 1.0 : (temp >= 26) ? (temp - 26) / 2.0 : 0.0; // Derajat keanggotaan panas
-  float dry = (humidity <= 30) ? 1.0 : (humidity <= 40) ? (40 - humidity) / 10.0 : 0.0; // Derajat keanggotaan kering
-  float comfortable_hum = (humidity >= 30 && humidity <= 50) ? (humidity - 30) / 20.0 : (humidity > 50 && humidity <= 70) ? (70 - humidity) / 20.0 : 0.0; // Derajat keanggotaan kelembaban nyaman
-  float humid = (humidity >= 60) ? 1.0 : (humidity >= 50) ? (humidity - 50) / 10.0 : 0.0; // Derajat keanggotaan lembab
-  float cold_strength = cold; // Rule 1: COLD
-  float cool_strength = max(min(comfortable, dry), min(cold, humid)); // Rule 2: COOL
-  float comfortable_strength = min(comfortable, comfortable_hum); // Rule 3: COMFORTABLE
-  float warm_strength = max(warm, min(comfortable, humid)); // Rule 4: WARM
-  float hot_strength = max(hot, min(hot, humid)); // Rule 5: HOT
-  float strengths[] = {cold_strength, cool_strength, comfortable_strength, warm_strength, hot_strength}; // Array derajat kekuatan
-  String categories[] = {"COLD", "COOL", "COMFORTABLE", "WARM", "HOT"}; // Array kategori hasil
-  int max_index = 0; // Inisialisasi index maksimum
-  for (int i = 1; i < 5; i++) { if (strengths[i] > strengths[max_index]) { max_index = i; } } // Cari nilai derajat terbesar
-  return categories[max_index]; // Kembalikan kategori dengan derajat tertinggi
+char auth[] = "";
+
+WiFiClient mqttWiFiClient;
+PubSubClient mqtt(mqttWiFiClient);
+
+unsigned long lastMqttPublish = 0;
+
+bool lcdBacklightState = true;
+unsigned long previousBlinkMillis = 0;
+const unsigned long BLINK_DELAY = 4500;
+const unsigned long BLINK_INTERVAL = 250;
+
+const float TEMP_SLOPE = 0.923;
+const float TEMP_INTERCEPT = -1.618;
+const float HUM_SLOPE = 0.926;
+const float HUM_INTERCEPT = 18.052;
+const float TEMP_BIAS = -3.84;
+const float HUM_BIAS = +14.18;
+
+float tempErrors[10];
+float humErrors[10];
+int errorIndex = 0;
+
+// Flag: OTA should run outside mqtt callback (safer)
+bool otaPending = false;
+String otaUrl = "";
+
+float calibrateTemperature(float rawTemp) { return (TEMP_SLOPE * rawTemp) + TEMP_INTERCEPT; }
+float calibrateHumidity(float rawHum) { return (HUM_SLOPE * rawHum) + HUM_INTERCEPT; }
+float calibrateTemperatureSimple(float rawTemp) { return rawTemp + TEMP_BIAS; }
+float calibrateHumiditySimple(float rawHum) { return rawHum + HUM_BIAS; }
+void recordCalibrationError(float tempError, float humError) {
+  tempErrors[errorIndex] = tempError;
+  humErrors[errorIndex] = humError;
+  errorIndex = (errorIndex + 1) % 10;
+}
+void getCurrentMAE(float &tempMAE, float &humMAE) {
+  float tempSum = 0, humSum = 0;
+  int count = 0;
+  for (int i = 0; i < 10; i++) {
+    if (tempErrors[i] != 0) {
+      tempSum += abs(tempErrors[i]);
+      humSum += abs(humErrors[i]);
+      count++;
+    }
+  }
+  tempMAE = count > 0 ? tempSum / count : 0;
+  humMAE = count > 0 ? humSum / count : 0;
+}
+float calculateAccuracy(float mae, float range) {
+  return max(0.0, 100.0 - (mae / range * 100.0));
+}
+float zeroIfNan(float value) { return isnan(value) ? 0.0 : value; }
+
+String fuzzyTemperatureComfort(float temp, float humidity) {
+  float cold = (temp <= 18) ? 1.0 : (temp <= 22) ? (22 - temp) / 4.0 : 0.0;
+  float comfortable = (temp >= 20 && temp <= 23) ? (temp - 20) / 3.0
+                      : (temp > 23 && temp <= 26) ? (26 - temp) / 3.0 : 0.0;
+  float warm = (temp >= 24 && temp <= 27) ? (temp - 24) / 3.0
+               : (temp > 27 && temp <= 30) ? (30 - temp) / 3.0 : 0.0;
+  float hot = (temp >= 28) ? 1.0 : (temp >= 26) ? (temp - 26) / 2.0 : 0.0;
+  float dry = (humidity <= 30) ? 1.0 : (humidity <= 40) ? (40 - humidity) / 10.0 : 0.0;
+  float comfortable_hum = (humidity >= 30 && humidity <= 50) ? (humidity - 30) / 20.0
+                          : (humidity > 50 && humidity <= 70) ? (70 - humidity) / 20.0 : 0.0;
+  float humid = (humidity >= 60) ? 1.0 : (humidity >= 50) ? (humidity - 50) / 10.0 : 0.0;
+  float cold_strength = cold;
+  float cool_strength = max(min(comfortable, dry), min(cold, humid));
+  float comfortable_strength = min(comfortable, comfortable_hum);
+  float warm_strength = max(warm, min(comfortable, humid));
+  float hot_strength = max(hot, min(hot, humid));
+  float strengths[] = {cold_strength, cool_strength, comfortable_strength, warm_strength, hot_strength};
+  String categories[] = {"COLD", "COOL", "COMFORTABLE", "WARM", "HOT"};
+  int max_index = 0;
+  for (int i = 1; i < 5; i++) {
+    if (strengths[i] > strengths[max_index]) max_index = i;
+  }
+  return categories[max_index];
 }
 
-String fuzzyEnergyConsumption(float voltage, float power, float powerFactor, float reactivePower) { // Fuzzy klasifikasi konsumsi energi
-  float voltage_low = (voltage <= 200) ? 1.0 : (voltage <= 210) ? (210 - voltage) / 10.0 : 0.0; // Derajat tegangan rendah
-  float voltage_normal = (voltage >= 205 && voltage <= 220) ? (voltage - 205) / 15.0 : (voltage > 220 && voltage <= 235) ? (235 - voltage) / 15.0 : 0.0; // Derajat tegangan normal
-  float voltage_high = (voltage >= 235) ? 1.0 : (voltage >= 230) ? (voltage - 230) / 5.0 : 0.0; // Derajat tegangan tinggi
-  float power_economical = (power <= 20) ? 1.0 : (power <= 30) ? (30 - power) / 10.0 : 0.0; // Derajat daya ekonomis
-  float power_normal = (power >= 25 && power <= 47.5) ? (power - 25) / 22.5 : (power > 47.5 && power <= 70) ? (70 - power) / 22.5 : 0.0; // Derajat daya normal
-  float power_wasteful = (power >= 80) ? 1.0 : (power >= 60) ? (power - 60) / 20.0 : 0.0; // Derajat daya boros
-  float pf_poor = (powerFactor <= 0.5) ? 1.0 : (powerFactor <= 0.6) ? (0.6 - powerFactor) / 0.1 : 0.0; // Derajat faktor daya buruk
-  float pf_fair = (powerFactor >= 0.55 && powerFactor <= 0.7) ? (powerFactor - 0.55) / 0.15 : (powerFactor > 0.7 && powerFactor <= 0.85) ? (0.85 - powerFactor) / 0.15 : 0.0; // Derajat faktor daya cukup
-  float pf_good = (powerFactor >= 0.90) ? 1.0 : (powerFactor >= 0.80) ? (powerFactor - 0.80) / 0.10 : 0.0; // Derajat faktor daya baik
-  float reactive_low = (reactivePower <= 15) ? 1.0 : (reactivePower <= 25) ? (25 - reactivePower) / 10.0 : 0.0; // Derajat daya reaktif rendah
-  float reactive_medium = (reactivePower >= 20 && reactivePower <= 37.5) ? (reactivePower - 20) / 17.5 : (reactivePower > 37.5 && reactivePower <= 55) ? (55 - reactivePower) / 17.5 : 0.0; // Derajat daya reaktif sedang
-  float reactive_high = (reactivePower >= 60) ? 1.0 : (reactivePower >= 45) ? (reactivePower - 45) / 15.0 : 0.0; // Derajat daya reaktif tinggi
-  float economical_strength = 0.0; // Inisialisasi kekuatan kategori ekonomis
-  float normal_strength = 0.0; // Inisialisasi kekuatan kategori normal
-  float wasteful_strength = 0.0; // Inisialisasi kekuatan kategori boros
+String fuzzyEnergyConsumption(float voltage, float power, float powerFactor, float reactivePower) {
+  float voltage_low = (voltage <= 200) ? 1.0 : (voltage <= 210) ? (210 - voltage) / 10.0 : 0.0;
+  float voltage_normal = (voltage >= 205 && voltage <= 220) ? (voltage - 205) / 15.0
+                         : (voltage > 220 && voltage <= 235) ? (235 - voltage) / 15.0 : 0.0;
+  float voltage_high = (voltage >= 235) ? 1.0 : (voltage >= 230) ? (voltage - 230) / 5.0 : 0.0;
+  float power_economical = (power <= 20) ? 1.0 : (power <= 30) ? (30 - power) / 10.0 : 0.0;
+  float power_normal = (power >= 25 && power <= 47.5) ? (power - 25) / 22.5
+                       : (power > 47.5 && power <= 70) ? (70 - power) / 22.5 : 0.0;
+  float power_wasteful = (power >= 80) ? 1.0 : (power >= 60) ? (power - 60) / 20.0 : 0.0;
+  float pf_poor = (powerFactor <= 0.5) ? 1.0 : (powerFactor <= 0.6) ? (0.6 - powerFactor) / 0.1 : 0.0;
+  float pf_fair = (powerFactor >= 0.55 && powerFactor <= 0.7) ? (powerFactor - 0.55) / 0.15
+                  : (powerFactor > 0.7 && powerFactor <= 0.85) ? (0.85 - powerFactor) / 0.15 : 0.0;
+  float pf_good = (powerFactor >= 0.90) ? 1.0 : (powerFactor >= 0.80) ? (powerFactor - 0.80) / 0.10 : 0.0;
+  float reactive_low = (reactivePower <= 15) ? 1.0 : (reactivePower <= 25) ? (25 - reactivePower) / 10.0 : 0.0;
+  float reactive_medium = (reactivePower >= 20 && reactivePower <= 37.5) ? (reactivePower - 20) / 17.5
+                          : (reactivePower > 37.5 && reactivePower <= 55) ? (55 - reactivePower) / 17.5 : 0.0;
+  float reactive_high = (reactivePower >= 60) ? 1.0 : (reactivePower >= 45) ? (reactivePower - 45) / 15.0 : 0.0;
+  float economical_strength = 0.0;
+  float normal_strength = 0.0;
+  float wasteful_strength = 0.0;
 
-  economical_strength = max(economical_strength, min(power_economical, pf_good)); // Rule 1: Daya EKONOMIS & PF BAIK -> EKONOMIS
-  economical_strength = max(economical_strength, min(power_economical, reactive_low)); // Rule 2: Daya EKONOMIS & Reaktif RENDAH -> EKONOMIS
-  economical_strength = max(economical_strength, min(power_economical, voltage_normal)); // Rule 3: Daya EKONOMIS & Tegangan NORMAL -> EKONOMIS
-  economical_strength = max(economical_strength, min(pf_good, reactive_low)); // Rule 4: PF BAIK & Reaktif RENDAH -> EKONOMIS
+  economical_strength = max(economical_strength, min(power_economical, pf_good));
+  economical_strength = max(economical_strength, min(power_economical, reactive_low));
+  economical_strength = max(economical_strength, min(power_economical, voltage_normal));
+  economical_strength = max(economical_strength, min(pf_good, reactive_low));
+  normal_strength = max(normal_strength, min(power_normal, pf_fair));
+  normal_strength = max(normal_strength, min(power_normal, voltage_normal));
+  normal_strength = max(normal_strength, min(power_normal, reactive_medium));
+  normal_strength = max(normal_strength, min(pf_fair, voltage_normal));
+  normal_strength = max(normal_strength, min(power_economical, pf_poor));
+  wasteful_strength = max(wasteful_strength, power_wasteful);
+  wasteful_strength = max(wasteful_strength, pf_poor);
+  wasteful_strength = max(wasteful_strength, reactive_high);
+  wasteful_strength = max(wasteful_strength, max(voltage_low, voltage_high));
+  wasteful_strength = max(wasteful_strength, min(power_normal, pf_poor));
+  wasteful_strength = max(wasteful_strength, min(power_wasteful, reactive_high));
 
-  normal_strength = max(normal_strength, min(power_normal, pf_fair)); // Rule 5: Daya NORMAL & PF CUKUP -> NORMAL
-  normal_strength = max(normal_strength, min(power_normal, voltage_normal)); // Rule 6: Daya NORMAL & Tegangan NORMAL -> NORMAL
-  normal_strength = max(normal_strength, min(power_normal, reactive_medium)); // Rule 7: Daya NORMAL & Reaktif SEDANG -> NORMAL
-  normal_strength = max(normal_strength, min(pf_fair, voltage_normal)); // Rule 8: PF CUKUP & Tegangan NORMAL -> NORMAL
-  normal_strength = max(normal_strength, min(power_economical, pf_poor)); // Rule 9: Daya EKONOMIS & PF BURUK -> NORMAL (kompensasi)
-
-  wasteful_strength = max(wasteful_strength, power_wasteful); // Rule 10: Daya BOROS -> BOROS
-  wasteful_strength = max(wasteful_strength, pf_poor); // Rule 11: PF BURUK -> BOROS
-  wasteful_strength = max(wasteful_strength, reactive_high); // Rule 12: Reaktif TINGGI -> BOROS
-  wasteful_strength = max(wasteful_strength, max(voltage_low, voltage_high)); // Rule 13: Tegangan RENDAH atau TINGGI -> BOROS
-  wasteful_strength = max(wasteful_strength, min(power_normal, pf_poor)); // Rule 14: Daya NORMAL & PF BURUK -> BOROS
-  wasteful_strength = max(wasteful_strength, min(power_wasteful, reactive_high)); // Rule 15: Daya BOROS & Reaktif TINGGI -> BOROS
-
-  if (economical_strength > normal_strength && economical_strength > wasteful_strength) return "ECONOMICAL"; // Defuzzifikasi: pilih ekonomis jika tertinggi
-  else if (wasteful_strength > normal_strength && wasteful_strength > economical_strength) return "WASTEFUL"; // Defuzzifikasi: pilih boros jika tertinggi
-  else return "NORMAL"; // Defuzzifikasi: pilih normal jika tidak ada yang dominan
+  if (economical_strength > normal_strength && economical_strength > wasteful_strength) return "ECONOMICAL";
+  if (wasteful_strength > normal_strength && wasteful_strength > economical_strength) return "WASTEFUL";
+  return "NORMAL";
 }
 
-void updateBlynkFuzzyStatus(float temperature, float humidity, float voltage, float power, float powerFactor, float reactivePower) { // Kirim status fuzzy ke Blynk
-  String tempComfort = fuzzyTemperatureComfort(temperature, humidity); // Dapatkan status kenyamanan termal
-  String energyStatus = fuzzyEnergyConsumption(voltage, power, powerFactor, reactivePower); // Dapatkan status konsumsi energi
-  int energyNumeric = (energyStatus == "ECONOMICAL") ? 1 : (energyStatus == "NORMAL") ? 2 : 3; // Konversi status ke angka 1,2,3
-  Blynk.virtualWrite(V10, tempComfort); // Kirim status kenyamanan ke Blynk virtual pin V10
-  Blynk.virtualWrite(V11, energyNumeric); // Kirim status energi ke Blynk virtual pin V11
-  Serial.println("=== FUZZY STATUS ==="); // Cetak header ke serial monitor
-  Serial.print("Thermal: "); Serial.print(tempComfort); Serial.print(" | "); Serial.print(temperature,1); Serial.print("°C / "); Serial.print(humidity,1); Serial.println("%"); // Cetak status termal
-  Serial.print("Energy: "); Serial.print(energyStatus); Serial.print(" | "); Serial.print(voltage,1); Serial.print("V / "); Serial.print(power,1); Serial.print("W / PF:"); Serial.print(powerFactor,2); Serial.println(); // Cetak status energi
+void updateBlynkFuzzyStatus(float temperature, float humidity, float voltage, float power,
+                            float powerFactor, float reactivePower) {
+  String tempComfort = fuzzyTemperatureComfort(temperature, humidity);
+  String energyStatus = fuzzyEnergyConsumption(voltage, power, powerFactor, reactivePower);
+  int energyNumeric = (energyStatus == "ECONOMICAL") ? 1 : (energyStatus == "NORMAL") ? 2 : 3;
+  Blynk.virtualWrite(V10, tempComfort);
+  Blynk.virtualWrite(V11, energyNumeric);
 }
 
-void handleLCDBlink(unsigned long currentMillis, unsigned long startTime) { // Fungsi kedip backlight LCD
-  bool shouldBlink = (currentMillis - startTime >= BLINK_DELAY); // Cek apakah sudah melewati delay awal
-  if (shouldBlink && currentMillis - previousBlinkMillis >= BLINK_INTERVAL) { // Jika waktu kedip tercapai
-    previousBlinkMillis = currentMillis; // Update waktu terakhir kedip
-    lcdBacklightState = !lcdBacklightState; // Balik status backlight
-    lcdBacklightState ? lcd.backlight() : lcd.noBacklight(); // Nyalakan atau matikan backlight
+void handleLCDBlink(unsigned long currentMillis, unsigned long startTime) {
+  bool shouldBlink = (currentMillis - startTime >= BLINK_DELAY);
+  if (shouldBlink && currentMillis - previousBlinkMillis >= BLINK_INTERVAL) {
+    previousBlinkMillis = currentMillis;
+    lcdBacklightState = !lcdBacklightState;
+    lcdBacklightState ? lcd.backlight() : lcd.noBacklight();
   }
 }
 
-void stopLCDBlink() { lcdBacklightState = true; lcd.backlight(); } // Hentikan kedip dan nyalakan backlight permanen
+void stopLCDBlink() {
+  lcdBacklightState = true;
+  lcd.backlight();
+}
 
-void checkBoot() { // Cek tombol boot untuk reset WiFi
-  pinMode(TRIGGER_PIN, INPUT_PULLUP); // Set pin tombol sebagai input pull-up
-  if (digitalRead(TRIGGER_PIN) == LOW) { // Jika tombol ditekan
-    delay(100); // Debounce 100ms
-    if (digitalRead(TRIGGER_PIN) == LOW) { // Konfirmasi tekan
-      Serial.println("Boot button pressed"); // Log ke serial
-      delay(5000); // Tunggu 5 detik
-      if (digitalRead(TRIGGER_PIN) == LOW) { // Jika masih ditekan
-        Serial.println("Resetting WiFi config..."); // Log reset
-        WiFiManager wfm; // Buat objek WiFiManager
-        wfm.resetSettings(); // Hapus konfigurasi WiFi tersimpan
-        ESP.restart(); // Restart ESP32
+void checkBoot() {
+  pinMode(TRIGGER_PIN, INPUT_PULLUP);
+  if (digitalRead(TRIGGER_PIN) == LOW) {
+    delay(100);
+    if (digitalRead(TRIGGER_PIN) == LOW) {
+      Serial.println("Boot button pressed");
+      delay(5000);
+      if (digitalRead(TRIGGER_PIN) == LOW) {
+        Serial.println("Resetting WiFi config...");
+        WiFiManager wfm;
+        wfm.resetSettings();
+        ESP.restart();
       }
     }
   }
 }
 
-void showIntroText() { // Tampilkan teks pembuka di LCD
-  lcd.clear(); // Bersihkan LCD
-  lcd.setCursor((16 - String("EcoOffice").length())/2, 0); lcd.print("EcoOffice"); // Tampilkan judul di tengah baris 0
-  lcd.setCursor((16 - String("By Danke Hidayat").length())/2, 1); lcd.print("By Danke Hidayat"); // Tampilkan author di tengah baris 1
+void showIntroText() {
+  lcd.clear();
+  lcd.setCursor((16 - String("EcoOffice").length()) / 2, 0);
+  lcd.print("EcoOffice");
+  lcd.setCursor((16 - String("By Danke Hidayat").length()) / 2, 1);
+  lcd.print("By Danke Hidayat");
 }
 
-void setup() { // Fungsi setup dijalankan sekali saat boot
-  Serial.begin(115200); // Inisialisasi serial monitor 115200 baud
-  Wire.begin(); // Inisialisasi komunikasi I2C
-  lcd.init(); // Inisialisasi LCD
-  lcd.backlight(); // Nyalakan backlight LCD
-
-  for (int i = 0; i < 10; i++) { tempErrors[i] = 0; humErrors[i] = 0; } // Reset array error
-
-  checkBoot(); // Cek tombol boot untuk reset WiFi
-  showIntroText(); // Tampilkan teks intro
-  delay(3500); // Tunggu 3.5 detik
-
-  #define AP_PASS "guard14n0ff1ce" // Password untuk portal WiFi manager
-  #define AP_SSID "EcoOffice" // Nama SSID untuk portal WiFi manager
-  const unsigned long WIFI_TIMEOUT = 60; // Timeout koneksi WiFi 60 detik
-  WiFiManager wfm; // Buat objek WiFiManager
-
-  wfm.setConfigPortalTimeout(WIFI_TIMEOUT); // Set timeout portal config
-  wfm.setHostname(AP_SSID); // Set hostname ESP32 di jaringan
-  wfm.setConnectTimeout(WIFI_TIMEOUT); // Set timeout proses koneksi
-
-  lcd.clear(); lcd.setCursor(0,0); lcd.print("Waiting for WiFi"); lcd.setCursor(0,1); lcd.print("Connection..."); // Tampilkan status mencari WiFi
-  unsigned long wifiStartTime = millis(); // Catat waktu mulai koneksi
-  bool connected = false; // Flag status koneksi
-
-  while (!connected && (millis() - wifiStartTime < WIFI_TIMEOUT * 1000)) { // Loop sampai timeout
-    connected = wfm.autoConnect(AP_SSID, AP_PASS); // Coba konek ke WiFi atau buat portal
-    handleLCDBlink(millis(), wifiStartTime); // Kedip LCD selama proses
-    delay(100); // Delay 100ms
+// ── Report OTA result to Selene API ───────────────────────
+void reportOtaResult(bool success, const String &errMsg) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = String(SELENE_API_BASE) + "/firmware/result";
+  if (!http.begin(client, url)) {
+    Serial.println("OTA: cannot begin result POST");
+    return;
   }
-  if (!connected) { // Jika gagal konek
-    Serial.println("Failed to connect to WiFi!"); // Log kegagalan
-    stopLCDBlink(); lcd.clear(); lcd.setCursor(0,0); lcd.print("Failed to Connect"); delay(1000); // Tampilkan pesan gagal
-    lcd.clear(); lcd.setCursor(0,0); lcd.print("Restarting ESP32..."); delay(3500); ESP.restart(); // Restart ESP32
-  } else { // Jika berhasil konek
-    Serial.println("WiFi Connected!"); // Log sukses
-    stopLCDBlink(); // Hentikan kedip LCD
-    lcd.clear(); lcd.setCursor(0,0); lcd.print("WiFi Connected!"); lcd.setCursor(0,1); lcd.print("IP:" + WiFi.localIP().toString()); delay(3000); // Tampilkan IP address
-  }
-
-  Blynk.begin(auth, WiFi.SSID().c_str(), WiFi.psk().c_str(), "iot.serangkota.go.id", 8080); // Inisialisasi Blynk ke server lokal
-  hwSerial.begin(9600, SERIAL_8N1, 16, 17); // Inisialisasi serial untuk PZEM-004T
-  dht.begin(); // Inisialisasi sensor DHT11
-
-  lcd.clear(); lcd.setCursor(0,0); lcd.print("System Ready!"); lcd.setCursor(0,1); lcd.print("Monitoring..."); delay(1500); // Tampilkan siap monitoring
-  Serial.println("System Started - Fuzzy Energy & Temp Monitoring"); // Log startup ke serial
+  http.addHeader("Content-Type", "application/json");
+  StaticJsonDocument<256> doc;
+  doc["nodeId"] = NODE_ID;
+  doc["success"] = success;
+  if (!success && errMsg.length()) doc["error"] = errMsg;
+  String body;
+  serializeJson(doc, body);
+  int code = http.POST(body);
+  Serial.printf("OTA: result POST HTTP %d\n", code);
+  http.end();
 }
 
-void loop() { // Fungsi loop dijalankan berulang
-  Blynk.run(); // Jalankan Blynk (keep alive dan proses data)
-  static unsigned long previousMillis = 0; // Waktu terakhir baca sensor
-  const unsigned long SENSOR_INTERVAL = 3000; // Interval baca sensor 3 detik
-  if (millis() - previousMillis >= SENSOR_INTERVAL) { // Jika sudah waktunya baca sensor
-    previousMillis = millis(); // Update waktu terakhir
-    float voltage = zeroIfNan(pzem.voltage()); // Baca tegangan dari PZEM
-    float current = zeroIfNan(pzem.current()); // Baca arus dari PZEM
-    float power = zeroIfNan(pzem.power()); // Baca daya dari PZEM
-    float energyWh = zeroIfNan(pzem.energy()); // Baca energi dari PZEM
-    float frequency = zeroIfNan(pzem.frequency()); // Baca frekuensi dari PZEM
-    float pf = zeroIfNan(pzem.pf()); // Baca faktor daya dari PZEM
-    float humidity = zeroIfNan(dht.readHumidity()); // Baca kelembaban dari DHT11
-    float temperature = zeroIfNan(dht.readTemperature()); // Baca suhu dari DHT11
-    float calibratedTemp = calibrateTemperature(temperature); // Kalibrasi suhu dengan regresi
-    float calibratedHum = calibrateHumidity(humidity); // Kalibrasi kelembaban dengan regresi
-    float simpleTemp = calibrateTemperatureSimple(temperature); // Kalibrasi suhu metode bias
-    float simpleHum = calibrateHumiditySimple(humidity); // Kalibrasi kelembaban metode bias
-    
-    recordCalibrationError(abs(calibratedTemp - simpleTemp), abs(calibratedHum - simpleHum)); // Catat error kalibrasi
+// ── Perform OTA (blocking; called from loop, not callback) ─
+void performOtaUpdate(const String &url) {
+  Serial.println("========================================");
+  Serial.println("OTA: starting HTTPS firmware update");
+  Serial.println(url);
+  Serial.println("========================================");
 
-    float apparentPower = (pf == 0) ? 0 : power / pf; // Hitung daya semu
-    float reactivePower = (pf == 0) ? 0 : sqrt(sq(apparentPower) - sq(power)); // Hitung daya reaktif
-    updateBlynkFuzzyStatus(calibratedTemp, calibratedHum, voltage, power, pf, reactivePower); // Kirim status fuzzy ke Blynk
-    static int displayMode = 0; // Mode tampilan LCD (0-4)
-    lcd.clear(); // Bersihkan LCD
-    
-    switch(displayMode) { // Tampilkan data sesuai mode
-      case 0: lcd.setCursor(0,0); lcd.print("Voltage: " + String(voltage,1) + "V"); lcd.setCursor(0,1); 
-      lcd.print("Current: " + String(current,3) + "A"); break; // Mode 0: Tegangan & Arus
-      case 1: lcd.setCursor(0,0); lcd.print("Power: " + String(power,1) + "W"); lcd.setCursor(0,1); 
-      lcd.print("Freq: " + String(frequency,1) + "Hz"); break; // Mode 1: Daya & Frekuensi
-      case 2: lcd.setCursor(0,0); lcd.print("Energy: " + String(energyWh,1) + "Wh"); lcd.setCursor(0,1);
-       lcd.print("PF: " + String(pf,2)); break; // Mode 2: Energi & Faktor Daya
-      case 3: lcd.setCursor(0,0); lcd.print("Temp: " + String(calibratedTemp,1) + "C"); lcd.setCursor(0,1); 
-      lcd.print("Humidity: " + String(calibratedHum,1) + "%"); break; // Mode 3: Suhu & Kelembaban
-      case 4: lcd.setCursor(0,0); lcd.print("Comfort:" + fuzzyTemperatureComfort(calibratedTemp, calibratedHum)); 
-      lcd.setCursor(0,1); lcd.print("Energy:" + fuzzyEnergyConsumption(voltage, power, pf, reactivePower)); break; // Mode 4: Status Fuzzy
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("OTA Update...");
+  lcd.setCursor(0, 1);
+  lcd.print("Downloading");
+
+  WiFiClientSecure client;
+  client.setInsecure();  // use CA cert later for production hardening
+  client.setTimeout(30);
+
+  httpUpdate.rebootOnUpdate(false);  // we reboot after reporting
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  t_httpUpdate_return ret = httpUpdate.update(client, url);
+
+  if (ret == HTTP_UPDATE_OK) {
+    Serial.println("OTA: SUCCESS — rebooting");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("OTA Success");
+    lcd.setCursor(0, 1);
+    lcd.print("Rebooting...");
+    reportOtaResult(true, "");
+    delay(1500);
+    ESP.restart();
+  }
+
+  String err = httpUpdate.getLastErrorString();
+  Serial.printf("OTA: FAILED (%d) %s\n", httpUpdate.getLastError(), err.c_str());
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("OTA Failed");
+  lcd.setCursor(0, 1);
+  lcd.print(err.substring(0, 16));
+  reportOtaResult(false, err);
+  delay(3000);
+}
+
+// ── MQTT connect ──────────────────────────────────────────
+bool connectMQTT() {
+  if (mqtt.connected()) return true;
+
+  String clientId = "selene-" + String(NODE_ID) + "-" + String(random(0xffff), HEX);
+  Serial.print("MQTT: Menghubungkan ke broker...");
+
+  String lwTopic = "selene/" + String(NODE_ID) + "/status";
+  String lwMessage = "{\"status\":\"offline\"}";
+
+  if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD, lwTopic.c_str(), 1, true,
+                   lwMessage.c_str())) {
+    Serial.println(" berhasil!");
+    mqtt.publish(lwTopic.c_str(), "{\"status\":\"online\"}", true);
+    String cmdTopic = "selene/" + String(NODE_ID) + "/command";
+    mqtt.subscribe(cmdTopic.c_str(), 1);
+    Serial.println("MQTT: Subscribe ke " + cmdTopic);
+    return true;
+  }
+
+  Serial.print(" gagal, rc=");
+  Serial.println(mqtt.state());
+  return false;
+}
+
+void publishTelemetryMQTT(float voltage, float current, float power, float pf, float energyWh,
+                          float frequency, float calibratedTemp, float calibratedHum,
+                          float apparentPower, float reactivePower) {
+  StaticJsonDocument<384> doc;
+  doc["voltage"] = voltage;
+  doc["current"] = current;
+  doc["power"] = power;
+  doc["pf"] = pf;
+  doc["energy"] = energyWh;
+  doc["frequency"] = frequency;
+  doc["apparentPower"] = apparentPower;
+  doc["reactivePower"] = reactivePower;
+  doc["temperature"] = calibratedTemp;
+  doc["humidity"] = calibratedHum;
+
+  String json;
+  serializeJson(doc, json);
+
+  String topic = "selene/" + String(NODE_ID) + "/telemetry";
+  if (mqtt.publish(topic.c_str(), json.c_str())) {
+    Serial.println("MQTT: Data terkirim ke " + topic);
+  } else {
+    Serial.println("MQTT: GAGAL mengirim data");
+  }
+}
+
+// ── MQTT callback: schedule OTA, handle reboot/status ─────
+void mqttCallback(char *topic, byte *payload, unsigned int length) {
+  String message;
+  message.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
+
+  Serial.print("MQTT: Perintah diterima [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(message);
+
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, message);
+  if (error) {
+    Serial.println("MQTT: Gagal parse JSON command");
+    return;
+  }
+
+  const char *command = doc["command"];
+  if (!command) {
+    Serial.println("MQTT: no command field");
+    return;
+  }
+
+  if (strcmp(command, "reboot") == 0) {
+    Serial.println("MQTT: Menjalankan perintah REBOOT...");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Remote Reboot...");
+    delay(1000);
+    ESP.restart();
+  }
+
+  if (strcmp(command, "status") == 0) {
+    String statusTopic = "selene/" + String(NODE_ID) + "/status";
+    String statusPayload = "{\"status\":\"online\",\"rssi\":" + String(WiFi.RSSI()) +
+                           ",\"uptime\":" + String(millis() / 1000) +
+                           ",\"free_heap\":" + String(ESP.getFreeHeap()) + "}";
+    mqtt.publish(statusTopic.c_str(), statusPayload.c_str());
+    Serial.println("MQTT: Status terkirim");
+  }
+
+  if (strcmp(command, "ota") == 0) {
+    const char *url = doc["url"];
+    if (!url || strlen(url) < 8) {
+      Serial.println("MQTT: OTA missing/invalid url");
+      return;
     }
-    displayMode = (displayMode + 1) % 5; // Ganti mode tampilan berikutnya
-    Blynk.virtualWrite(V0, voltage); 
-    Blynk.virtualWrite(V1, current); 
-    Blynk.virtualWrite(V2, power); // Kirim tegangan, arus, daya ke Blynk
-    
-    Blynk.virtualWrite(V3, pf); 
-    Blynk.virtualWrite(V4, apparentPower); 
-    Blynk.virtualWrite(V5, energyWh); // Kirim PF, daya semu, energi ke Blynk
+    // Defer blocking HTTPUpdate to loop()
+    otaUrl = String(url);
+    otaPending = true;
+    Serial.println("MQTT: OTA scheduled");
+    Serial.println(otaUrl);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("OTA queued...");
+  }
+}
 
-    Blynk.virtualWrite(V6, frequency); 
-    Blynk.virtualWrite(V7, reactivePower); 
-    Blynk.virtualWrite(V8, calibratedTemp); 
-    Blynk.virtualWrite(V9, calibratedHum); // Kirim frekuensi, reaktif, suhu, kelembaban ke Blynk
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Wire.begin();
+  lcd.init();
+  lcd.backlight();
+
+  for (int i = 0; i < 10; i++) {
+    tempErrors[i] = 0;
+    humErrors[i] = 0;
+  }
+
+  checkBoot();
+  showIntroText();
+  delay(3500);
+
+#define AP_PASS ""
+#define AP_SSID "EcoOffice"
+  const unsigned long WIFI_TIMEOUT = 60;
+  WiFiManager wfm;
+
+  wfm.setConfigPortalTimeout(WIFI_TIMEOUT);
+  wfm.setHostname(AP_SSID);
+  wfm.setConnectTimeout(WIFI_TIMEOUT);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Waiting for WiFi");
+  lcd.setCursor(0, 1);
+  lcd.print("Connection...");
+  unsigned long wifiStartTime = millis();
+  bool connected = false;
+
+  while (!connected && (millis() - wifiStartTime < WIFI_TIMEOUT * 1000)) {
+    connected = wfm.autoConnect(AP_SSID, AP_PASS);
+    handleLCDBlink(millis(), wifiStartTime);
+    delay(100);
+  }
+  if (!connected) {
+    Serial.println("Failed to connect to WiFi!");
+    stopLCDBlink();
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Failed to Connect");
+    delay(1000);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Restarting ESP32...");
+    delay(3500);
+    ESP.restart();
+  }
+
+  Serial.println("WiFi Connected!");
+  stopLCDBlink();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Connected!");
+  lcd.setCursor(0, 1);
+  lcd.print("IP:" + WiFi.localIP().toString());
+  delay(3000);
+
+  Blynk.config(auth, "", 8080);
+  if (Blynk.connect(3000)) {
+    Serial.println("Blynk connected!");
+  } else {
+    Serial.println("Blynk connection timeout, continuing...");
+  }
+
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setBufferSize(1024);  // room for OTA command JSON + long URL
+  mqtt.setKeepAlive(60);
+
+  hwSerial.begin(9600, SERIAL_8N1, 16, 17);
+  dht.begin();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("System Ready!");
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring...");
+  delay(1500);
+  lcd.clear();
+
+  Serial.println("System Started - Energy (PZEM) + Environment (DHT11) + MQTT OTA");
+  Serial.print("MQTT Node ID: ");
+  Serial.println(NODE_ID);
+  Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
+}
+
+void loop() {
+  // Run OTA outside MQTT callback (blocking download)
+  if (otaPending) {
+    otaPending = false;
+    String url = otaUrl;
+    otaUrl = "";
+    performOtaUpdate(url);
+  }
+
+  Blynk.run();
+
+  static unsigned long lastMqttAttempt = 0;
+  const unsigned long MQTT_RETRY_INTERVAL = 5000;
+
+  if (!mqtt.connected() && millis() - lastMqttAttempt >= MQTT_RETRY_INTERVAL) {
+    lastMqttAttempt = millis();
+    connectMQTT();
+  }
+  mqtt.loop();
+
+  static unsigned long previousMillis = 0;
+  const unsigned long SENSOR_INTERVAL = 3000;
+  if (millis() - previousMillis >= SENSOR_INTERVAL) {
+    previousMillis = millis();
+    float voltage = zeroIfNan(pzem.voltage());
+    float current = zeroIfNan(pzem.current());
+    float power = zeroIfNan(pzem.power());
+    float energyWh = zeroIfNan(pzem.energy());
+    float frequency = zeroIfNan(pzem.frequency());
+    float pf = zeroIfNan(pzem.pf());
+    float humidity = zeroIfNan(dht.readHumidity());
+    float temperature = zeroIfNan(dht.readTemperature());
+    float calibratedTemp = calibrateTemperature(temperature);
+    float calibratedHum = calibrateHumidity(humidity);
+    float simpleTemp = calibrateTemperatureSimple(temperature);
+    float simpleHum = calibrateHumiditySimple(humidity);
+
+    recordCalibrationError(abs(calibratedTemp - simpleTemp), abs(calibratedHum - simpleHum));
+
+    float apparentPower = (pf == 0) ? 0 : power / pf;
+    float reactivePower = (pf == 0) ? 0 : sqrt(sq(apparentPower) - sq(power));
+    updateBlynkFuzzyStatus(calibratedTemp, calibratedHum, voltage, power, pf, reactivePower);
+
+    static int displayMode = 0;
+    lcd.clear();
+
+    switch (displayMode) {
+      case 0:
+        lcd.setCursor(0, 0);
+        lcd.print("Voltage: " + String(voltage, 1) + "V");
+        lcd.setCursor(0, 1);
+        lcd.print("Current: " + String(current, 3) + "A");
+        break;
+      case 1:
+        lcd.setCursor(0, 0);
+        lcd.print("Power: " + String(power, 1) + "W");
+        lcd.setCursor(0, 1);
+        lcd.print("Freq: " + String(frequency, 1) + "Hz");
+        break;
+      case 2:
+        lcd.setCursor(0, 0);
+        lcd.print("Energy: " + String(energyWh, 1) + "Wh");
+        lcd.setCursor(0, 1);
+        lcd.print("PF: " + String(pf, 2));
+        break;
+      case 3:
+        lcd.setCursor(0, 0);
+        lcd.print("Temp: " + String(calibratedTemp, 1) + "C");
+        lcd.setCursor(0, 1);
+        lcd.print("Humidity: " + String(calibratedHum, 1) + "%");
+        break;
+      case 4:
+        lcd.setCursor(0, 0);
+        lcd.print("Comfort:" + fuzzyTemperatureComfort(calibratedTemp, calibratedHum));
+        lcd.setCursor(0, 1);
+        lcd.print("Energy:" + fuzzyEnergyConsumption(voltage, power, pf, reactivePower));
+        break;
+    }
+    displayMode = (displayMode + 1) % 5;
+
+    Blynk.virtualWrite(V0, voltage);
+    Blynk.virtualWrite(V1, current);
+    Blynk.virtualWrite(V2, power);
+    Blynk.virtualWrite(V3, pf);
+    Blynk.virtualWrite(V4, apparentPower);
+    Blynk.virtualWrite(V5, energyWh);
+    Blynk.virtualWrite(V6, frequency);
+    Blynk.virtualWrite(V7, reactivePower);
+    Blynk.virtualWrite(V8, calibratedTemp);
+    Blynk.virtualWrite(V9, calibratedHum);
+  }
+
+  if (millis() - lastMqttPublish >= MQTT_PUBLISH_INTERVAL) {
+    lastMqttPublish = millis();
+
+    float voltageMQTT = zeroIfNan(pzem.voltage());
+    float currentMQTT = zeroIfNan(pzem.current());
+    float powerMQTT = zeroIfNan(pzem.power());
+    float energyWhMQTT = zeroIfNan(pzem.energy());
+    float frequencyMQTT = zeroIfNan(pzem.frequency());
+    float pfMQTT = zeroIfNan(pzem.pf());
+    float humidityMQTT = zeroIfNan(dht.readHumidity());
+    float temperatureMQTT = zeroIfNan(dht.readTemperature());
+    float calibratedTempMQTT = calibrateTemperature(temperatureMQTT);
+    float calibratedHumMQTT = calibrateHumidity(humidityMQTT);
+    float apparentPowerMQTT = (pfMQTT == 0) ? 0 : powerMQTT / pfMQTT;
+    float reactivePowerMQTT =
+        (pfMQTT == 0) ? 0 : sqrt(sq(apparentPowerMQTT) - sq(powerMQTT));
+
+    publishTelemetryMQTT(voltageMQTT, currentMQTT, powerMQTT, pfMQTT, energyWhMQTT,
+                         frequencyMQTT, calibratedTempMQTT, calibratedHumMQTT,
+                         apparentPowerMQTT, reactivePowerMQTT);
   }
 }
