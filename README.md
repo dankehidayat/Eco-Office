@@ -226,20 +226,30 @@ OTA cannot install itself. Flash this sketch **once over USB**:
 2. Selene → log in as **ADMIN** → **Admin Tools → Firmware**.  
 3. Target node = `NODE_ID` (e.g. `office-main`).  
 4. Upload `Eco Office.ino.bin` (main app binary, magic `0xE9`).  
-5. Serial should show:
+5. Serial / LCD should show:
    ```text
    MQTT: Perintah diterima [...]: {"command":"ota",...}
-   MQTT: OTA scheduled
+   OTA: scheduled
    OTA: starting HTTPS firmware update
-   OTA: SUCCESS — rebooting
+   OTA: progress 10% ...
+   OTA: SUCCESS, rebooting
    ```
+   LCD: `OTA queued...` → `Downloading...` → `OTA Success`.
 6. Device reboots into the new firmware. Selene may mark history **success** when the full binary is delivered.
+
+**How OTA is delivered**
+
+1. **MQTT push** (immediate): backend publishes `{ command:"ota", url, size }` to `selene/<NODE_ID>/command` and re-publishes every ~12s until download starts.  
+2. **HTTP pull** (fallback): device GETs `/api/firmware/check/<NODE_ID>` about once a minute. If a binary is pending, it starts the same HTTPS download.
 
 **Notes:**
 
+- Admin upload is **not** a USB flash. The sketch already running must include the OTA handler (this branch, flashed once over USB).  
+- Confirm EMQX shows the device online **and** that Serial responds to a status command before blaming the .bin.  
 - Do not power-cycle mid-flash.  
 - TLS uses `setInsecure()` for bring-up; pin a CA cert for production.  
-- Sketch size is large (~1 MB); keep an OTA-capable partition table.
+- Sketch size is large (~1 MB); keep an OTA-capable partition table.  
+- Export the **application** `.bin` (magic byte `0xE9`), not bootloader-only images.
 
 ---
 
@@ -284,8 +294,10 @@ Aligned with Selene backend analytics for consistent labels on device and dashbo
 |---------|--------|
 | No MQTT in EMQX | Broker IP, user/pass, `NODE_ID`, firewall :1883 |
 | `bad_username_or_password` | Create EMQX user matching `MQTT_USER` / `MQTT_PASSWORD` |
-| OTA command ignored | USB-flashed this branch? Serial shows “Perintah diterima”? |
-| OTA fails HTTP | `SELENE_API_BASE` / download URL reachable over HTTPS from device network |
+| OTA command ignored | USB-flashed this branch? Serial shows “Perintah diterima”? Wrong `NODE_ID`? |
+| EMQX connected but no OTA | MQTT push may be fine while HTTPS download fails. Watch Serial for `OTA: FAILED`. LCD shows error. |
+| OTA fails HTTP | `SELENE_API_BASE` must be `https://selene.dankehidayat.my.id/api`. Device Wi-Fi must reach that host. |
+| History stuck pending | Device never hit download URL. Check Serial for schedule; wrong node in Admin; firmware expired (~15 min). |
 | OTA partition error | Tools → Partition Scheme → one **with OTA** |
 | Admin target empty | Device must publish telemetry first so backend discovers the node |
 

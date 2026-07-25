@@ -81,6 +81,8 @@ int errorIndex = 0;
 // Flag: OTA should run outside mqtt callback (safer)
 bool otaPending = false;
 String otaUrl = "";
+unsigned long lastOtaPullCheck = 0;
+const unsigned long OTA_PULL_INTERVAL_MS = 60000;  // also poll server if MQTT push missed
 
 float calibrateTemperature(float rawTemp) { return (TEMP_SLOPE * rawTemp) + TEMP_INTERCEPT; }
 float calibrateHumidity(float rawHum) { return (HUM_SLOPE * rawHum) + HUM_INTERCEPT; }
@@ -224,11 +226,32 @@ void showIntroText() {
   lcd.print("By Danke Hidayat");
 }
 
+// ── Schedule OTA from MQTT push or HTTP pull ──────────────
+void scheduleOta(const String &url) {
+  if (url.length() < 8) {
+    Serial.println("OTA: reject empty/short url");
+    return;
+  }
+  if (otaPending && otaUrl == url) {
+    Serial.println("OTA: already queued for same url");
+    return;
+  }
+  otaUrl = url;
+  otaPending = true;
+  Serial.println("OTA: scheduled");
+  Serial.println(otaUrl);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("OTA queued...");
+}
+
 // ── Report OTA result to Selene API ───────────────────────
 void reportOtaResult(bool success, const String &errMsg) {
   WiFiClientSecure client;
   client.setInsecure();
+  client.setTimeout(20);
   HTTPClient http;
+  http.setTimeout(20000);
   String url = String(SELENE_API_BASE) + "/firmware/result";
   if (!http.begin(client, url)) {
     Serial.println("OTA: cannot begin result POST");
@@ -246,30 +269,114 @@ void reportOtaResult(bool success, const String &errMsg) {
   http.end();
 }
 
+/**
+ * Pull fallback: if Admin uploaded a .bin but the MQTT ota push was missed
+ * (device busy, brief disconnect), GET /api/firmware/check/<node> still works.
+ */
+void checkPendingOtaPull() {
+  if (otaPending) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  String base = String(SELENE_API_BASE);
+  if (base.indexOf("YOUR_DOMAIN") >= 0 || base.length() < 12) {
+    // Secrets not configured in this build
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15);
+  HTTPClient http;
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  String url = base + "/firmware/check/" + String(NODE_ID);
+  Serial.print("OTA: pull check ");
+  Serial.println(url);
+
+  if (!http.begin(client, url)) {
+    Serial.println("OTA: pull check begin failed");
+    return;
+  }
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("OTA: pull check HTTP %d\n", code);
+    http.end();
+    return;
+  }
+
+  String body = http.getString();
+  http.end();
+
+  StaticJsonDocument<384> doc;
+  if (deserializeJson(doc, body)) {
+    Serial.println("OTA: pull check JSON parse failed");
+    return;
+  }
+
+  if (!doc["pending"].as<bool>()) {
+    Serial.println("OTA: no pending firmware on server");
+    return;
+  }
+
+  const char *dl = doc["url"];
+  if (!dl || strlen(dl) < 8) {
+    Serial.println("OTA: pending but missing url");
+    return;
+  }
+
+  Serial.printf("OTA: server has pending firmware (%d bytes)\n",
+                doc["size"].as<int>());
+  scheduleOta(String(dl));
+}
+
 // ── Perform OTA (blocking; called from loop, not callback) ─
 void performOtaUpdate(const String &url) {
   Serial.println("========================================");
   Serial.println("OTA: starting HTTPS firmware update");
   Serial.println(url);
+  Serial.printf("OTA: free heap before = %u\n", ESP.getFreeHeap());
   Serial.println("========================================");
 
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("OTA Update...");
   lcd.setCursor(0, 1);
-  lcd.print("Downloading");
+  lcd.print("Preparing...");
+
+  // Free sockets / RAM before TLS download (MQTT + Blynk hold connections)
+  mqtt.disconnect();
+  delay(200);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Downloading...");
 
   WiFiClientSecure client;
-  client.setInsecure();  // use CA cert later for production hardening
-  client.setTimeout(30);
+  client.setInsecure();  // production: pin CA or use setCACert
+  client.setTimeout(120);  // seconds on ESP32 WiFiClientSecure
 
   httpUpdate.rebootOnUpdate(false);  // we reboot after reporting
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  httpUpdate.closeConnectionsOnUpdate(true);
+
+  httpUpdate.onProgress([](int cur, int total) {
+    static int lastPct = -1;
+    int pct = (total > 0) ? (cur * 100) / total : 0;
+    if (pct != lastPct && (pct % 10 == 0 || pct == 100)) {
+      lastPct = pct;
+      Serial.printf("OTA: progress %d%% (%d/%d)\n", pct, cur, total);
+      lcd.setCursor(0, 1);
+      lcd.print("DL ");
+      lcd.print(pct);
+      lcd.print("%          ");
+    }
+  });
 
   t_httpUpdate_return ret = httpUpdate.update(client, url);
 
   if (ret == HTTP_UPDATE_OK) {
-    Serial.println("OTA: SUCCESS — rebooting");
+    Serial.println("OTA: SUCCESS, rebooting");
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("OTA Success");
@@ -280,15 +387,18 @@ void performOtaUpdate(const String &url) {
     ESP.restart();
   }
 
+  int errCode = httpUpdate.getLastError();
   String err = httpUpdate.getLastErrorString();
-  Serial.printf("OTA: FAILED (%d) %s\n", httpUpdate.getLastError(), err.c_str());
+  Serial.printf("OTA: FAILED (%d) %s\n", errCode, err.c_str());
+  Serial.printf("OTA: free heap after = %u\n", ESP.getFreeHeap());
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("OTA Failed");
   lcd.setCursor(0, 1);
   lcd.print(err.substring(0, 16));
-  reportOtaResult(false, err);
+  reportOtaResult(false, String(errCode) + " " + err);
   delay(3000);
+  // MQTT will reconnect on next loop via connectMQTT()
 }
 
 // ── MQTT connect ──────────────────────────────────────────
@@ -308,6 +418,8 @@ bool connectMQTT() {
     String cmdTopic = "selene/" + String(NODE_ID) + "/command";
     mqtt.subscribe(cmdTopic.c_str(), 1);
     Serial.println("MQTT: Subscribe ke " + cmdTopic);
+    // Catch OTA that was uploaded while we were offline
+    lastOtaPullCheck = 0;
     return true;
   }
 
@@ -392,13 +504,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
       return;
     }
     // Defer blocking HTTPUpdate to loop()
-    otaUrl = String(url);
-    otaPending = true;
-    Serial.println("MQTT: OTA scheduled");
-    Serial.println(otaUrl);
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("OTA queued...");
+    scheduleOta(String(url));
   }
 }
 
@@ -511,6 +617,12 @@ void loop() {
     connectMQTT();
   }
   mqtt.loop();
+
+  // Pull fallback if MQTT ota push was missed
+  if (!otaPending && millis() - lastOtaPullCheck >= OTA_PULL_INTERVAL_MS) {
+    lastOtaPullCheck = millis();
+    checkPendingOtaPull();
+  }
 
   static unsigned long previousMillis = 0;
   const unsigned long SENSOR_INTERVAL = 3000;
