@@ -358,7 +358,8 @@ void performOtaUpdate(const String &url) {
 
   httpUpdate.rebootOnUpdate(false);  // we reboot after reporting
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  httpUpdate.closeConnectionsOnUpdate(true);
+  // Note: closeConnectionsOnUpdate() is not available on all ESP32 Arduino cores
+  // (e.g. 3.3.x). MQTT is already disconnected above before HTTPS starts.
 
   httpUpdate.onProgress([](int cur, int total) {
     static int lastPct = -1;
