@@ -2,7 +2,9 @@
  * Eco Office — Smart Energy & Environment Monitor
  * Board: ESP32 DevKit V1
  * Sensors:
- *   - PZEM-004T  → electrical energy (V, I, P, PF, f, energy)
+ *   - PZEM-004T  → electrical (V, I, P, PF, f, energy in kWh)
+ *     Note: PZEM004Tv30::energy() returns kWh (raw register is Wh / 1000).
+ *     MQTT field "energy", Blynk V5, and LCD all use kWh — not Wh.
  *   - DHT11      → environment (temperature, humidity)
  * Features: Blynk, LCD, MQTT telemetry to Selene, MQTT commands (reboot/status/OTA)
  *
@@ -314,7 +316,8 @@ bool connectMQTT() {
   return false;
 }
 
-void publishTelemetryMQTT(float voltage, float current, float power, float pf, float energyWh,
+// energyKwh: cumulative from pzem.energy() — already kWh (library divides Wh by 1000)
+void publishTelemetryMQTT(float voltage, float current, float power, float pf, float energyKwh,
                           float frequency, float calibratedTemp, float calibratedHum,
                           float apparentPower, float reactivePower) {
   StaticJsonDocument<384> doc;
@@ -322,7 +325,7 @@ void publishTelemetryMQTT(float voltage, float current, float power, float pf, f
   doc["current"] = current;
   doc["power"] = power;
   doc["pf"] = pf;
-  doc["energy"] = energyWh;
+  doc["energy"] = energyKwh;  // kWh (same unit Selene stores as total_energy)
   doc["frequency"] = frequency;
   doc["apparentPower"] = apparentPower;
   doc["reactivePower"] = reactivePower;
@@ -516,7 +519,8 @@ void loop() {
     float voltage = zeroIfNan(pzem.voltage());
     float current = zeroIfNan(pzem.current());
     float power = zeroIfNan(pzem.power());
-    float energyWh = zeroIfNan(pzem.energy());
+    // PZEM004Tv30::energy() returns kWh (internal Wh register / 1000)
+    float energyKwh = zeroIfNan(pzem.energy());
     float frequency = zeroIfNan(pzem.frequency());
     float pf = zeroIfNan(pzem.pf());
     float humidity = zeroIfNan(dht.readHumidity());
@@ -549,8 +553,9 @@ void loop() {
         lcd.print("Freq: " + String(frequency, 1) + "Hz");
         break;
       case 2:
+        // 3 decimals: 0.001 kWh = 1 Wh (PZEM resolution)
         lcd.setCursor(0, 0);
-        lcd.print("Energy: " + String(energyWh, 1) + "Wh");
+        lcd.print("E:" + String(energyKwh, 3) + "kWh");
         lcd.setCursor(0, 1);
         lcd.print("PF: " + String(pf, 2));
         break;
@@ -574,7 +579,7 @@ void loop() {
     Blynk.virtualWrite(V2, power);
     Blynk.virtualWrite(V3, pf);
     Blynk.virtualWrite(V4, apparentPower);
-    Blynk.virtualWrite(V5, energyWh);
+    Blynk.virtualWrite(V5, energyKwh);  // kWh — set Blynk V5 widget unit to kWh
     Blynk.virtualWrite(V6, frequency);
     Blynk.virtualWrite(V7, reactivePower);
     Blynk.virtualWrite(V8, calibratedTemp);
@@ -587,7 +592,7 @@ void loop() {
     float voltageMQTT = zeroIfNan(pzem.voltage());
     float currentMQTT = zeroIfNan(pzem.current());
     float powerMQTT = zeroIfNan(pzem.power());
-    float energyWhMQTT = zeroIfNan(pzem.energy());
+    float energyKwhMQTT = zeroIfNan(pzem.energy());  // kWh
     float frequencyMQTT = zeroIfNan(pzem.frequency());
     float pfMQTT = zeroIfNan(pzem.pf());
     float humidityMQTT = zeroIfNan(dht.readHumidity());
@@ -598,7 +603,7 @@ void loop() {
     float reactivePowerMQTT =
         (pfMQTT == 0) ? 0 : sqrt(sq(apparentPowerMQTT) - sq(powerMQTT));
 
-    publishTelemetryMQTT(voltageMQTT, currentMQTT, powerMQTT, pfMQTT, energyWhMQTT,
+    publishTelemetryMQTT(voltageMQTT, currentMQTT, powerMQTT, pfMQTT, energyKwhMQTT,
                          frequencyMQTT, calibratedTempMQTT, calibratedHumMQTT,
                          apparentPowerMQTT, reactivePowerMQTT);
   }

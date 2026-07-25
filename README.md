@@ -78,7 +78,7 @@ On **`main`**: original report materials and the pre-Selene sketch (unchanged by
 
 ## Features
 
-- **Energy monitoring** — voltage, current, active/apparent/reactive power, PF, frequency, cumulative energy  
+- **Energy monitoring** — voltage, current, active/apparent/reactive power, PF, frequency, cumulative energy (**kWh** from `PZEM004Tv30::energy()`)  
 - **Environment monitoring** — temperature & humidity with linear-regression calibration  
 - **Fuzzy Mamdani** — thermal comfort (COLD…HOT) and energy class (ECONOMICAL / NORMAL / WASTEFUL)  
 - **LCD** — 5 rotating screens (power + climate + fuzzy labels)  
@@ -147,6 +147,8 @@ char auth[] = "";
   "humidity": 60.0
 }
 ```
+
+> **`energy` is kWh** (not Wh). The PZEM-004T raw register is Wh; the PZEM004Tv30 library divides by 1000 before returning. Selene stores this as `total_energy` in kWh.
 
 ### Status
 
