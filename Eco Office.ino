@@ -466,18 +466,28 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
   Serial.print("]: ");
   Serial.println(message);
 
-  StaticJsonDocument<512> doc;
+  // Capacity for long HTTPS OTA URLs
+  StaticJsonDocument<768> doc;
   DeserializationError error = deserializeJson(doc, message);
   if (error) {
-    Serial.println("MQTT: Gagal parse JSON command");
+    Serial.print("MQTT: Gagal parse JSON command: ");
+    Serial.println(error.c_str());
     return;
   }
 
-  const char *command = doc["command"];
-  if (!command) {
+  // Copy into stack buffers so we never depend on JsonDocument pointer lifetime
+  const char *commandPtr = doc["command"] | "";
+  char command[24];
+  strncpy(command, commandPtr, sizeof(command) - 1);
+  command[sizeof(command) - 1] = '\0';
+
+  if (command[0] == '\0') {
     Serial.println("MQTT: no command field");
     return;
   }
+
+  Serial.print("MQTT: parsed command=");
+  Serial.println(command);
 
   if (strcmp(command, "reboot") == 0) {
     Serial.println("MQTT: Menjalankan perintah REBOOT...");
@@ -486,6 +496,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
     lcd.print("Remote Reboot...");
     delay(1000);
     ESP.restart();
+    return;
   }
 
   if (strcmp(command, "status") == 0) {
@@ -495,17 +506,23 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
                            ",\"free_heap\":" + String(ESP.getFreeHeap()) + "}";
     mqtt.publish(statusTopic.c_str(), statusPayload.c_str());
     Serial.println("MQTT: Status terkirim");
+    return;
   }
 
   if (strcmp(command, "ota") == 0) {
-    const char *url = doc["url"];
-    if (!url || strlen(url) < 8) {
+    const char *urlPtr = doc["url"] | "";
+    if (strlen(urlPtr) < 8) {
       Serial.println("MQTT: OTA missing/invalid url");
       return;
     }
-    // Defer blocking HTTPUpdate to loop()
-    scheduleOta(String(url));
+    Serial.println("MQTT: OTA branch OK, queueing download");
+    // Defer blocking HTTPUpdate to loop() — never block inside callback
+    scheduleOta(String(urlPtr));
+    return;
   }
+
+  Serial.print("MQTT: unknown command (ignored): ");
+  Serial.println(command);
 }
 
 void setup() {
@@ -592,10 +609,11 @@ void setup() {
   delay(1500);
   lcd.clear();
 
-  Serial.println("System Started - Energy (PZEM) + Environment (DHT11) + MQTT OTA");
+  Serial.println("System Started - Energy + Environment + MQTT OTA v2");
   Serial.print("MQTT Node ID: ");
   Serial.println(NODE_ID);
   Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
+  Serial.println("OTA: USB-flash marker — if you see ota MQTT without 'OTA branch OK', reflash this sketch");
 }
 
 void loop() {
