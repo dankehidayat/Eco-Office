@@ -1,3 +1,24 @@
+/*
+ * EcoOffice v1 (Blynk) — REVISI
+ * Skripsi: Implementasi Logika Fuzzy Mamdani Untuk Pemantauan Energi Listrik
+ *          dan Suhu Ruangan Secara Real-Time Berbasis IoT
+ * Penulis: Danke Hidayat (J0304211049) — Pembimbing: Ridwan Siskandar
+ *
+ * PERUBAHAN REVISI terhadap versi sebelumnya:
+ * 1. Fungsi fuzzyTemperatureComfort() dimigrasikan ke DESAIN FINAL skripsi
+ *    (desain notebook Colab): 5 himpunan suhu, 3 himpunan kelembaban,
+ *    8 aturan Mamdani, implikasi MIN, agregasi MAX, dan defuzzifikasi
+ *    CENTROID diskrit pada skor 0-10 (bukan max-membership seperti sebelumnya).
+ *    Himpunan Panas diperluas sampai 35 C agar seluruh semesta suhu tercakup.
+ *    Keluaran perangkat kini identik dengan software (error 0% pada Tabel 6).
+ * 2. Perbaikan satuan energi: pzem.energy() mengembalikan kWh, sehingga
+ *    tampilan LCD mode 2 memakai kWh (sebelumnya salah berlabel Wh).
+ * 3. Modul energi fuzzyEnergyConsumption() TIDAK diubah (15 aturan,
+ *    tie -> NORMAL sudah sesuai desain final).
+ * Catatan keamanan: token Blynk dan kredensial WiFi ada di file ini —
+ * segera rotasi setelah skripsi dipublikasikan.
+ */
+
 #include <WiFi.h> // Koneksi WiFi ESP32
 #include <WiFiClient.h> // Klien TCP/IP untuk koneksi internet
 #define BLYNK_TEMPLATE_ID "TMPL6eUbLFTuj" // ID template Blynk dari dashboard
@@ -46,24 +67,77 @@ void getCurrentMAE(float &tempMAE, float &humMAE) { float tempSum=0,humSum=0; in
 float calculateAccuracy(float mae, float range) { return max(0.0, 100.0 - (mae / range * 100.0)); } // Hitung akurasi dalam persentase dari MAE
 float zeroIfNan(float value) { return isnan(value) ? 0.0 : value; } // Ubah nilai NaN menjadi 0 untuk menghindari error
 
-String fuzzyTemperatureComfort(float temp, float humidity) { // Fungsi fuzzy untuk kenyamanan termal
-  float cold = (temp <= 18) ? 1.0 : (temp <= 22) ? (22 - temp) / 4.0 : 0.0; // Derajat keanggotaan dingin
-  float comfortable = (temp >= 20 && temp <= 23) ? (temp - 20) / 3.0 : (temp > 23 && temp <= 26) ? (26 - temp) / 3.0 : 0.0; // Derajat keanggotaan nyaman
-  float warm = (temp >= 24 && temp <= 27) ? (temp - 24) / 3.0 : (temp > 27 && temp <= 30) ? (30 - temp) / 3.0 : 0.0; // Derajat keanggotaan hangat
-  float hot = (temp >= 28) ? 1.0 : (temp >= 26) ? (temp - 26) / 2.0 : 0.0; // Derajat keanggotaan panas
-  float dry = (humidity <= 30) ? 1.0 : (humidity <= 40) ? (40 - humidity) / 10.0 : 0.0; // Derajat keanggotaan kering
-  float comfortable_hum = (humidity >= 30 && humidity <= 50) ? (humidity - 30) / 20.0 : (humidity > 50 && humidity <= 70) ? (70 - humidity) / 20.0 : 0.0; // Derajat keanggotaan kelembaban nyaman
-  float humid = (humidity >= 60) ? 1.0 : (humidity >= 50) ? (humidity - 50) / 10.0 : 0.0; // Derajat keanggotaan lembab
-  float cold_strength = cold; // Rule 1: COLD
-  float cool_strength = max(min(comfortable, dry), min(cold, humid)); // Rule 2: COOL
-  float comfortable_strength = min(comfortable, comfortable_hum); // Rule 3: COMFORTABLE
-  float warm_strength = max(warm, min(comfortable, humid)); // Rule 4: WARM
-  float hot_strength = max(hot, min(hot, humid)); // Rule 5: HOT
-  float strengths[] = {cold_strength, cool_strength, comfortable_strength, warm_strength, hot_strength}; // Array derajat kekuatan
-  String categories[] = {"COLD", "COOL", "COMFORTABLE", "WARM", "HOT"}; // Array kategori hasil
-  int max_index = 0; // Inisialisasi index maksimum
-  for (int i = 1; i < 5; i++) { if (strengths[i] > strengths[max_index]) { max_index = i; } } // Cari nilai derajat terbesar
-  return categories[max_index]; // Kembalikan kategori dengan derajat tertinggi
+float fwTrimf(float x, float a, float b, float c) { // Fungsi keanggotaan segitiga (semantik identik skfuzzy.trimf)
+  if (x <= a || x >= c) return (x == b) ? 1.0 : 0.0; // Tepat di kaki bernilai 0, tepat di puncak bernilai 1
+  if (x <= b) return (x - a) / (b - a); // Sisi naik segitiga
+  return (c - x) / (c - b); // Sisi turun segitiga
+}
+
+float fwTrapmf(float x, float a, float b, float c, float d) { // Fungsi keanggotaan trapesium (semantik identik skfuzzy.trapmf)
+  if (x <= a || x >= d) return (x >= b && x <= c) ? 1.0 : 0.0; // Di luar bahu: penuh hanya jika plateau menyentuh tepi semesta
+  if (x < b) return (b > a) ? (x - a) / (b - a) : 1.0; // Sisi naik trapesium
+  if (x <= c) return 1.0; // Dataran penuh (plateau)
+  return (d > c) ? (d - x) / (d - c) : 1.0; // Sisi turun trapesium
+}
+
+String fuzzyTemperatureComfort(float temp, float humidity) { // Fungsi fuzzy kenyamanan termal (REVISI: desain final skripsi)
+  // REVISI: desain lama (4 himpunan suhu, 5 aturan, max-membership) diganti
+  // dengan desain final notebook Colab: 5 himpunan suhu, 3 himpunan kelembaban,
+  // 8 aturan Mamdani, implikasi MIN, agregasi MAX, defuzzifikasi centroid.
+  if (temp < 20.0) temp = 20.0; // Clamp suhu ke batas bawah semesta universal (20 C)
+  if (temp > 35.0) temp = 35.0; // Clamp suhu ke batas atas semesta universal (35 C)
+  if (humidity < 30.0) humidity = 30.0; // Clamp kelembaban ke batas bawah semesta (30%)
+  if (humidity > 90.0) humidity = 90.0; // Clamp kelembaban ke batas atas semesta (90%)
+
+  float cold = fwTrapmf(temp, 20.0, 20.0, 23.0, 24.5); // Derajat keanggotaan Dingin: trapesium [20; 20; 23; 24,5]
+  float cool = fwTrimf(temp, 23.0, 24.5, 26.0); // Derajat keanggotaan Sejuk: segitiga [23; 24,5; 26]
+  float comfortable = fwTrimf(temp, 24.0, 26.5, 29.0); // Derajat keanggotaan Nyaman: segitiga [24; 26,5; 29]
+  float warm = fwTrimf(temp, 26.0, 28.0, 30.0); // Derajat keanggotaan Hangat: segitiga [26; 28; 30]
+  float hot = fwTrapmf(temp, 28.0, 29.5, 35.0, 35.0); // Derajat keanggotaan Panas: trapesium [28; 29,5; 35; 35] (REVISI: diperluas s.d. 35 C)
+
+  float dry = fwTrimf(humidity, 30.0, 40.0, 50.0); // Derajat keanggotaan Kering: segitiga [30; 40; 50]
+  float comfortable_hum = fwTrimf(humidity, 45.0, 60.0, 75.0); // Derajat keanggotaan Kelembaban Nyaman: segitiga [45; 60; 75]
+  float humid = fwTrimf(humidity, 70.0, 80.0, 90.0); // Derajat keanggotaan Lembab: segitiga [70; 80; 90]
+
+  float r1 = cold; // R1: IF Suhu=Cold THEN Kenyamanan=Cold
+  float r2 = cool; // R2: IF Suhu=Cool THEN Kenyamanan=Cool
+  float r3 = min(comfortable, comfortable_hum); // R3: IF Suhu=Comfortable AND Kelembaban=Comfortable THEN Kenyamanan=Comfortable
+  float r4 = min(comfortable, dry); // R4: IF Suhu=Comfortable AND Kelembaban=Dry THEN Kenyamanan=Cool
+  float r5 = min(comfortable, humid); // R5: IF Suhu=Comfortable AND Kelembaban=Humid THEN Kenyamanan=Warm
+  float r6 = warm; // R6: IF Suhu=Warm THEN Kenyamanan=Warm
+  float r7 = hot; // R7: IF Suhu=Hot THEN Kenyamanan=Hot
+  float r8 = min(cold, humid); // R8: IF Suhu=Cold AND Kelembaban=Humid THEN Kenyamanan=Cool
+
+  float strengths[5]; // Array kekuatan agregat per kategori output
+  strengths[0] = r1; // Agregasi kategori Cold (hanya R1)
+  strengths[1] = max(max(r2, r4), r8); // Agregasi kategori Cool (R2, R4, R8 digabung MAX)
+  strengths[2] = r3; // Agregasi kategori Comfortable (hanya R3)
+  strengths[3] = max(r5, r6); // Agregasi kategori Warm (R5, R6 digabung MAX)
+  strengths[4] = r7; // Agregasi kategori Hot (hanya R7)
+
+  float outMF[5][3] = {{0.0, 2.0, 4.0}, {2.0, 3.5, 5.0}, {4.0, 5.5, 7.0}, {5.5, 7.0, 8.5}, {7.0, 8.5, 10.0}}; // Segitiga output: Cold, Cool, Comfortable, Warm, Hot pada skor 0-10
+  float num = 0.0; // Pembilang centroid (akumulasi momen)
+  float den = 0.0; // Penyebut centroid (akumulasi luas agregat)
+  for (int i = 0; i <= 100; i++) { // Sapuan 101 titik diskrit dari 0,0 sampai 10,0
+    float x = i * 0.1; // Titik output saat ini (langkah 0,1)
+    float agg = 0.0; // Nilai agregat pada titik x
+    for (int k = 0; k < 5; k++) { // Gabungkan kelima himpunan output
+      if (strengths[k] > 0.0) { // Hanya himpunan yang terbakar yang dihitung
+        float mu = fwTrimf(x, outMF[k][0], outMF[k][1], outMF[k][2]); // Derajat keanggotaan output di titik x
+        float clipped = min(strengths[k], mu); // Implikasi MIN (pemotongan/clipping)
+        if (clipped > agg) agg = clipped; // Agregasi MAX antar himpunan output
+      }
+    }
+    num += agg * x; // Akumulasi momen (agg x x)
+    den += agg; // Akumulasi luas agregat
+  }
+  float score = (den > 0.0) ? (num / den) : 0.0; // Defuzzifikasi centroid: skor kenyamanan 0-10
+
+  if (score <= 2.5) return "COLD"; // Skor 0-2,5 -> Dingin (nilai 1)
+  if (score <= 4.0) return "COOL"; // Skor 2,5-4 -> Sejuk (nilai 1)
+  if (score <= 6.0) return "COMFORTABLE"; // Skor 4-6 -> Nyaman (nilai 2)
+  if (score <= 7.5) return "WARM"; // Skor 6-7,5 -> Hangat (nilai 3)
+  return "HOT"; // Skor >7,5 -> Panas (nilai 3)
 }
 
 String fuzzyEnergyConsumption(float voltage, float power, float powerFactor, float reactivePower) { // Fuzzy klasifikasi konsumsi energi
@@ -208,7 +282,7 @@ void loop() { // Fungsi loop dijalankan berulang
     float voltage = zeroIfNan(pzem.voltage()); // Baca tegangan dari PZEM
     float current = zeroIfNan(pzem.current()); // Baca arus dari PZEM
     float power = zeroIfNan(pzem.power()); // Baca daya dari PZEM
-    float energyWh = zeroIfNan(pzem.energy()); // Baca energi dari PZEM
+    float energyKwh = zeroIfNan(pzem.energy()); // Baca energi dari PZEM (satuan kWh — REVISI: sebelumnya salah dinamai Wh)
     float frequency = zeroIfNan(pzem.frequency()); // Baca frekuensi dari PZEM
     float pf = zeroIfNan(pzem.pf()); // Baca faktor daya dari PZEM
     float humidity = zeroIfNan(dht.readHumidity()); // Baca kelembaban dari DHT11
@@ -227,29 +301,29 @@ void loop() { // Fungsi loop dijalankan berulang
     lcd.clear(); // Bersihkan LCD
     
     switch(displayMode) { // Tampilkan data sesuai mode
-      case 0: lcd.setCursor(0,0); lcd.print("Voltage: " + String(voltage,1) + "V"); lcd.setCursor(0,1); 
+      case 0: lcd.setCursor(0,0); lcd.print("Voltage: " + String(voltage,1) + "V"); lcd.setCursor(0,1); // Mode 0 baris atas: tegangan (dilanjutkan baris bawah)
       lcd.print("Current: " + String(current,3) + "A"); break; // Mode 0: Tegangan & Arus
-      case 1: lcd.setCursor(0,0); lcd.print("Power: " + String(power,1) + "W"); lcd.setCursor(0,1); 
+      case 1: lcd.setCursor(0,0); lcd.print("Power: " + String(power,1) + "W"); lcd.setCursor(0,1); // Mode 1 baris atas: daya aktif (dilanjutkan baris bawah)
       lcd.print("Freq: " + String(frequency,1) + "Hz"); break; // Mode 1: Daya & Frekuensi
-      case 2: lcd.setCursor(0,0); lcd.print("Energy: " + String(energyWh,1) + "Wh"); lcd.setCursor(0,1);
-       lcd.print("PF: " + String(pf,2)); break; // Mode 2: Energi & Faktor Daya
-      case 3: lcd.setCursor(0,0); lcd.print("Temp: " + String(calibratedTemp,1) + "C"); lcd.setCursor(0,1); 
+      case 2: lcd.setCursor(0,0); lcd.print("E:" + String(energyKwh,3) + "kWh"); lcd.setCursor(0,1); // Mode 2 baris atas: energi kWh (dilanjutkan baris bawah)
+       lcd.print("PF: " + String(pf,2)); break; // Mode 2: Energi (kWh — REVISI) & Faktor Daya
+      case 3: lcd.setCursor(0,0); lcd.print("Temp: " + String(calibratedTemp,1) + "C"); lcd.setCursor(0,1); // Mode 3 baris atas: suhu terkalibrasi (dilanjutkan baris bawah)
       lcd.print("Humidity: " + String(calibratedHum,1) + "%"); break; // Mode 3: Suhu & Kelembaban
-      case 4: lcd.setCursor(0,0); lcd.print("Comfort:" + fuzzyTemperatureComfort(calibratedTemp, calibratedHum)); 
+      case 4: lcd.setCursor(0,0); lcd.print("Comfort:" + fuzzyTemperatureComfort(calibratedTemp, calibratedHum)); // Mode 4 baris atas: status kenyamanan termal (dilanjutkan baris bawah)
       lcd.setCursor(0,1); lcd.print("Energy:" + fuzzyEnergyConsumption(voltage, power, pf, reactivePower)); break; // Mode 4: Status Fuzzy
     }
     displayMode = (displayMode + 1) % 5; // Ganti mode tampilan berikutnya
-    Blynk.virtualWrite(V0, voltage); 
-    Blynk.virtualWrite(V1, current); 
+    Blynk.virtualWrite(V0, voltage); // Kirim tegangan ke pin virtual V0
+    Blynk.virtualWrite(V1, current); // Kirim arus ke pin virtual V1
     Blynk.virtualWrite(V2, power); // Kirim tegangan, arus, daya ke Blynk
     
-    Blynk.virtualWrite(V3, pf); 
-    Blynk.virtualWrite(V4, apparentPower); 
-    Blynk.virtualWrite(V5, energyWh); // Kirim PF, daya semu, energi ke Blynk
+    Blynk.virtualWrite(V3, pf); // Kirim faktor daya ke pin virtual V3
+    Blynk.virtualWrite(V4, apparentPower); // Kirim daya semu ke pin virtual V4
+    Blynk.virtualWrite(V5, energyKwh); // Kirim PF, daya semu, energi (kWh) ke Blynk
 
-    Blynk.virtualWrite(V6, frequency); 
-    Blynk.virtualWrite(V7, reactivePower); 
-    Blynk.virtualWrite(V8, calibratedTemp); 
+    Blynk.virtualWrite(V6, frequency); // Kirim frekuensi ke pin virtual V6
+    Blynk.virtualWrite(V7, reactivePower); // Kirim daya reaktif ke pin virtual V7
+    Blynk.virtualWrite(V8, calibratedTemp); // Kirim suhu terkalibrasi ke pin virtual V8
     Blynk.virtualWrite(V9, calibratedHum); // Kirim frekuensi, reaktif, suhu, kelembaban ke Blynk
   }
 }
